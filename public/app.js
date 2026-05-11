@@ -16,7 +16,9 @@ const state = {
   nextRefreshAt: null,
   refreshReason: "",
   inboxOpen: false,
-  inbox: loadInbox()
+  inbox: loadInbox(),
+  merging: new Set(),
+  merged: new Set()
 };
 
 const views = {
@@ -238,6 +240,10 @@ function actionKey(row) {
 
 function prKey(row) {
   return row?.url || `${row?.repo || ""}#${row?.number || ""}`;
+}
+
+function mergeKey(repo, number) {
+  return `${repo || ""}#${number || ""}`;
 }
 
 function buildActivitySnapshot(data) {
@@ -545,6 +551,7 @@ function renderMetrics(data) {
   const navCounts = {
     pass: data.summary.passingPrs,
     fail: data.summary.failingPrs,
+    conflicts: data.summary.conflictPrs,
     running: data.summary.runningPrs,
     runningCd: data.summary.runningCd,
     deployments: data.summary.runningDeployments,
@@ -610,10 +617,52 @@ function render() {
 }
 
 function renderRow(row, viewKey, view) {
-  if (["pass", "fail", "running"].includes(viewKey)) return renderPrRow(row, view);
+  if (["pass", "fail", "running", "conflicts"].includes(viewKey)) return renderPrRow(row, view);
   if (["runningCd", "failedCd"].includes(viewKey)) return renderCdRow(row, view, viewKey);
   if (viewKey === "deployments") return renderDeploymentRow(row, view);
   return renderRunnerRow(row, view);
+}
+
+function mergeBlockReason(row) {
+  if (row.state !== "pass") return "CI is not passing";
+  if (!row.checkCount) return "No completed CI checks were reported";
+  if (row.isDraft) return "Draft pull requests cannot be merged";
+  if (row.hasConflict) return "Resolve merge conflicts first";
+  return "";
+}
+
+function renderPrActions(row) {
+  const key = mergeKey(row.repo, row.number);
+  const reason = mergeBlockReason(row);
+  const isMerging = state.merging.has(key);
+  const isMerged = state.merged.has(key);
+  const buttonLabel = isMerged ? "Merged" : isMerging ? "Merging" : "Merge";
+  const buttonTitle = isMerged
+    ? "Pull request merged"
+    : isMerging
+    ? "Merging pull request..."
+    : reason || "Merge this passing pull request";
+  const mergeButton = row.state === "pass"
+    ? `<button
+         class="merge-button"
+         type="button"
+         data-repo="${escapeHtml(row.repo)}"
+         data-number="${escapeHtml(row.number)}"
+         data-title="${escapeHtml(row.title)}"
+         data-state="${isMerged ? "merged" : isMerging ? "merging" : "ready"}"
+         aria-label="${escapeHtml(buttonLabel)} ${escapeHtml(row.repo)} ${escapeHtml(row.numberLabel)}"
+         ${reason || isMerging || isMerged ? "disabled" : ""}
+         title="${escapeHtml(buttonTitle)}"
+       >
+         ${buttonLabel}
+       </button>`
+    : "";
+  return `
+    <div class="row-actions">
+      ${mergeButton}
+      <a class="open-link" href="${escapeHtml(row.url)}" target="_blank" rel="noreferrer">Open PR</a>
+    </div>
+  `;
 }
 
 function renderPrRow(row, view) {
@@ -647,7 +696,7 @@ function renderPrRow(row, view) {
         ${draftBadge}
       </div>
       <div class="meta">${escapeHtml(detail)}</div>
-      <a class="open-link" href="${escapeHtml(row.url)}" target="_blank" rel="noreferrer">Open PR</a>
+      ${renderPrActions(row)}
     </article>
   `;
 }
@@ -845,6 +894,52 @@ function setMode(mode) {
   refresh();
 }
 
+async function mergePullRequest(button) {
+  const repo = button.dataset.repo;
+  const number = Number(button.dataset.number);
+  const key = mergeKey(repo, number);
+  const title = button.dataset.title || `#${number}`;
+  if (!repo || !Number.isInteger(number)) return;
+
+  state.merging.add(key);
+  state.merged.delete(key);
+  setError("");
+  render();
+  try {
+    const response = await fetch("/api/pull-request/merge", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ repo, number })
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(data.error || "Unable to merge pull request");
+    }
+    if (!data.merged) {
+      throw new Error(data.message || "GitHub did not merge the pull request");
+    }
+    state.merging.delete(key);
+    state.merged.add(key);
+    render();
+    const branchStatus = data.branchDelete?.deleted
+      ? "Branch deleted."
+      : data.branchDelete?.error
+      ? `Branch delete failed: ${data.branchDelete.error}`
+      : "Branch delete was skipped.";
+    showToast(
+      data.branchDelete?.deleted ? "PR merged" : "PR merged, branch not deleted",
+      `${data.pr?.repo || repo} ${data.pr?.numberLabel || `#${number}`}: ${data.pr?.title || title}. ${branchStatus}`
+    );
+    await refresh({ source: "merge" });
+  } catch (error) {
+    setError(error.message);
+    showToast("Merge failed", error.message);
+  } finally {
+    state.merging.delete(key);
+    render();
+  }
+}
+
 /* —— wiring —— */
 document.querySelectorAll(".segment").forEach((button) => {
   button.addEventListener("click", () => setMode(button.dataset.mode));
@@ -931,6 +1026,15 @@ els.inboxPanel.addEventListener("click", (event) => {
   }
   markInboxItemRead(item.dataset.id);
 });
+
+els.content.addEventListener("click", (event) => {
+  const button = event.target.closest(".merge-button");
+  if (!button) return;
+  event.preventDefault();
+  event.stopPropagation();
+  mergePullRequest(button);
+});
+
 document.addEventListener("click", (event) => {
   if (!state.inboxOpen) return;
   if (event.target.closest("#inboxPanel") || event.target.closest("#inboxToggle")) return;

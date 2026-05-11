@@ -744,7 +744,15 @@ button.metric.active::before { width: 4px; }
   overflow-wrap: anywhere;
 }
 
-.open-link {
+.row-actions {
+  display: inline-flex;
+  gap: 7px;
+  align-items: center;
+  justify-content: flex-end;
+  justify-self: end;
+}
+
+.open-link, .merge-button {
   display: inline-flex;
   gap: 4px;
   justify-content: center;
@@ -763,6 +771,28 @@ button.metric.active::before { width: 4px; }
   text-transform: uppercase;
   transition: background 160ms ease, color 160ms ease;
 }
+.merge-button {
+  border-color: var(--green);
+  background: var(--green);
+  color: var(--paper-strong);
+}
+.merge-button:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--green) 84%, black);
+  border-color: color-mix(in srgb, var(--green) 84%, black);
+}
+.merge-button:disabled {
+  border-color: var(--line-strong);
+  background: var(--gray-soft);
+  color: var(--muted-strong);
+  cursor: not-allowed;
+  opacity: 0.72;
+}
+.merge-button[data-state="merged"]:disabled {
+  border-color: color-mix(in srgb, var(--green) 58%, var(--line-strong));
+  background: var(--green-soft);
+  color: var(--green);
+  opacity: 1;
+}
 .open-link::after {
   content: "↗";
   font-weight: 500;
@@ -771,6 +801,11 @@ button.metric.active::before { width: 4px; }
 }
 .open-link:hover { background: var(--ink); color: var(--paper-strong); }
 .open-link:hover::after { transform: translate(1px, -1px); }
+.open-link:focus-visible,
+.merge-button:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: 2px;
+}
 
 /* —————————————————————— EMPTY —————————————————————— */
 .empty {
@@ -829,7 +864,7 @@ button.metric.active::before { width: 4px; }
   .segmented { width: 100%; }
   .segment { min-width: 0; flex: 1; }
   .row { grid-template-columns: 1fr; align-items: start; }
-  .open-link { justify-self: start; }
+  .row-actions { justify-self: start; }
   .meta-hint { display: none; }
   .inbox-panel { right: 0; left: 0; width: auto; }
 }

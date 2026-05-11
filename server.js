@@ -69,6 +69,59 @@ const PR_SEARCH_GRAPHQL = `
   }
 `;
 
+const PR_BY_NUMBER_GRAPHQL = `
+  query($owner: String!, $name: String!, $number: Int!) {
+    repository(owner: $owner, name: $name) {
+      pullRequest(number: $number) {
+        number
+        title
+        url
+        isDraft
+        mergeable
+        headRefName
+        headRepository {
+          nameWithOwner
+        }
+        author {
+          login
+        }
+        repository {
+          nameWithOwner
+        }
+        commits(last: 1) {
+          nodes {
+            commit {
+              statusCheckRollup {
+                contexts(first: 100) {
+                  nodes {
+                    __typename
+                    ... on CheckRun {
+                      name
+                      status
+                      conclusion
+                      checkSuite {
+                        workflowRun {
+                          workflow {
+                            name
+                          }
+                        }
+                      }
+                    }
+                    ... on StatusContext {
+                      context
+                      state
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+`;
+
 const CD_WORKFLOW_PATTERN = /(^|[^A-Za-z0-9])(cd|deploy|deployment|release|publish)([^A-Za-z0-9]|$)/i;
 const FAILED_CD_MAX_AGE_MS = 3 * 24 * 60 * 60 * 1000;
 const RUNNING_RUN_STATUSES = new Set(["queued", "in_progress", "waiting", "requested", "pending"]);
@@ -327,6 +380,23 @@ function parseJobs(value) {
   return Math.min(jobs, 16);
 }
 
+function parseRepo(value) {
+  const repo = String(value || "").trim();
+  const [owner, name, extra] = repo.split("/");
+  if (!owner || !name || extra) {
+    throw new HttpError(400, "Expected repo in owner/name format.");
+  }
+  return { owner, name, repo };
+}
+
+function parsePullNumber(value) {
+  const number = Number(value);
+  if (!Number.isInteger(number) || number < 1) {
+    throw new HttpError(400, "Expected a positive pull request number.");
+  }
+  return number;
+}
+
 function isWithinFailedCdWindow(value) {
   const time = new Date(value).getTime();
   return Number.isFinite(time) && Date.now() - time <= FAILED_CD_MAX_AGE_MS;
@@ -365,7 +435,9 @@ function classifyPullRequest(pr) {
     url: pr.url,
     isDraft: Boolean(pr.isDraft),
     mergeable,
-    hasConflict
+    hasConflict,
+    headRefName: pr.headRefName || "",
+    headRepo: pr.headRepository?.nameWithOwner || ""
   };
   if (!checks.length) {
     return { ...base, state: "pass", checkCount: 0, runningChecks: [] };
@@ -403,6 +475,16 @@ async function fetchPrQuery(queryText) {
     endCursor = search.pageInfo.endCursor;
   }
   return pullRequests;
+}
+
+async function fetchPullRequestByNumber(repo, number) {
+  const { owner, name } = parseRepo(repo);
+  const json = await githubGraphql(PR_BY_NUMBER_GRAPHQL, { owner, name, number });
+  const pr = json?.data?.repository?.pullRequest;
+  if (!pr) {
+    throw new HttpError(404, `Pull request ${repo}#${number} was not found.`);
+  }
+  return classifyPullRequest(pr);
 }
 
 async function getAccount() {
@@ -683,6 +765,125 @@ async function sendJson(res, status, body) {
   res.end(JSON.stringify(body));
 }
 
+async function readJsonBody(req, { maxBytes = 1024 * 1024 } = {}) {
+  return new Promise((resolve, reject) => {
+    let body = "";
+    req.setEncoding("utf8");
+    req.on("data", (chunk) => {
+      body += chunk;
+      if (body.length > maxBytes) {
+        reject(new HttpError(413, "Request body is too large."));
+        req.destroy();
+      }
+    });
+    req.on("end", () => {
+      if (!body.trim()) {
+        resolve({});
+        return;
+      }
+      try {
+        resolve(JSON.parse(body));
+      } catch {
+        reject(new HttpError(400, "Request body must be valid JSON."));
+      }
+    });
+    req.on("error", reject);
+  });
+}
+
+function mergeMethod(value) {
+  if (value == null || value === "") return undefined;
+  if (["merge", "squash", "rebase"].includes(value)) return value;
+  throw new HttpError(400, "mergeMethod must be merge, squash, or rebase.");
+}
+
+function encodeRefPath(ref) {
+  return String(ref)
+    .split("/")
+    .map((segment) => encodeURIComponent(segment))
+    .join("/");
+}
+
+async function deletePullRequestBranch(pr) {
+  if (!pr.headRepo || !pr.headRefName) {
+    return {
+      deleted: false,
+      skipped: true,
+      reason: "Pull request head branch was not available."
+    };
+  }
+
+  try {
+    await githubRequest(`/repos/${pr.headRepo}/git/refs/heads/${encodeRefPath(pr.headRefName)}`, {
+      method: "DELETE"
+    });
+    return {
+      deleted: true,
+      repo: pr.headRepo,
+      branch: pr.headRefName
+    };
+  } catch (error) {
+    if (error.status === 404) {
+      return {
+        deleted: true,
+        alreadyDeleted: true,
+        repo: pr.headRepo,
+        branch: pr.headRefName
+      };
+    }
+    return {
+      deleted: false,
+      repo: pr.headRepo,
+      branch: pr.headRefName,
+      error: error.message
+    };
+  }
+}
+
+async function mergePullRequest(req, res) {
+  if (req.method !== "POST") {
+    throw new HttpError(405, "Method not allowed");
+  }
+
+  const body = await readJsonBody(req);
+  const { repo } = parseRepo(body.repo);
+  const number = parsePullNumber(body.number);
+  const pr = await fetchPullRequestByNumber(repo, number);
+  if (!pr || pr.state !== "pass" || pr.checkCount < 1) {
+    throw new HttpError(409, "This pull request does not have completed passing CI checks.");
+  }
+  if (pr.isDraft) {
+    throw new HttpError(409, "Draft pull requests cannot be merged.");
+  }
+  if (pr.hasConflict) {
+    throw new HttpError(409, "This pull request has merge conflicts.");
+  }
+
+  const result = await githubRequest(`/repos/${repo}/pulls/${number}/merge`, {
+    method: "PUT",
+    body: {
+      merge_method: mergeMethod(body.mergeMethod)
+    }
+  });
+  const merged = Boolean(result?.merged);
+  const branchDelete = merged
+    ? await deletePullRequestBranch(pr)
+    : { deleted: false, skipped: true, reason: "Pull request was not merged." };
+
+  await sendJson(res, 200, {
+    merged,
+    message: result?.message || "Pull request merged.",
+    branchDelete,
+    pr: {
+      repo: pr.repo,
+      number: pr.number,
+      numberLabel: pr.numberLabel,
+      title: pr.title,
+      url: pr.url
+    }
+  });
+}
+
 async function sendStatic(req, res) {
   const requestUrl = new URL(req.url, `http://${req.headers.host}`);
   const pathname = requestUrl.pathname === "/" ? "/index.html" : requestUrl.pathname;
@@ -720,6 +921,10 @@ const server = http.createServer(async (req, res) => {
           rateLimit: snapshotRateLimit(metrics)
         });
       }
+      return;
+    }
+    if (requestUrl.pathname === "/api/pull-request/merge") {
+      await mergePullRequest(req, res);
       return;
     }
     if (requestUrl.pathname === "/api/health") {

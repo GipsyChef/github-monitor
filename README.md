@@ -10,7 +10,7 @@ It calls GitHub's REST and GraphQL APIs directly, scans open PRs, classifies PRs
 - Frontend: dependency-free HTML/CSS/JavaScript
 - Data source: direct GitHub REST and GraphQL API calls
 
-This intentionally avoids storing GitHub tokens, adding a database, or introducing app auth. The local server reads `GITHUB_TOKEN` or `GH_TOKEN`; if neither is set, it uses `gh auth token` once to discover your existing local token.
+This intentionally avoids storing GitHub tokens, adding a database, or introducing app auth. The local server reads `GITHUB_TOKEN` or `GH_TOKEN`; if neither is set, it uses `gh auth token` once to discover your existing local token. Merging PRs from the dashboard uses the same token and requires write access to the target repository.
 
 ## Prerequisites
 
@@ -73,10 +73,12 @@ The browser refreshes faster when PR checks, CD actions, deployments, or runners
 
 ```text
 GET /api/status?mode=all&includeCd=1&includeRunners=0&includeRepoRunners=0&jobs=4
+POST /api/pull-request/merge
 GET /api/health
 ```
 
 `mode` can be `all`, `owned`, or `mine`.
+Merge requests must include JSON like `{"repo":"owner/name","number":123}`. The server re-checks the PR before merging, rejects drafts, conflicts, and PRs without completed passing CI, then deletes the PR head branch after a successful merge.
 
 ## Notes
 
