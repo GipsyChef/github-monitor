@@ -26,6 +26,8 @@ const PR_SEARCH_GRAPHQL = `
           number
           title
           url
+          isDraft
+          mergeable
           author {
             login
           }
@@ -351,15 +353,23 @@ function runningCheckLabel(check) {
 
 function classifyPullRequest(pr) {
   const checks = pr.commits?.nodes?.[0]?.commit?.statusCheckRollup?.contexts?.nodes?.filter(Boolean) || [];
-  if (!checks.length) return null;
+  const mergeable = pr.mergeable || "UNKNOWN";
+  const hasConflict = mergeable === "CONFLICTING";
+  if (!checks.length && !hasConflict) return null;
   const base = {
     repo: pr.repository.nameWithOwner,
     number: pr.number,
     numberLabel: `#${pr.number}`,
     title: pr.title,
     author: pr.author?.login || "unknown",
-    url: pr.url
+    url: pr.url,
+    isDraft: Boolean(pr.isDraft),
+    mergeable,
+    hasConflict
   };
+  if (!checks.length) {
+    return { ...base, state: "pass", checkCount: 0, runningChecks: [] };
+  }
   if (checks.every(checkFinished)) {
     return {
       ...base,
@@ -620,13 +630,15 @@ async function buildDashboardData(requestUrl) {
   const prGroups = {
     pass: pullRequests.filter((pr) => pr.state === "pass").sort(sortByRepoAndNumber),
     fail: pullRequests.filter((pr) => pr.state === "fail").sort(sortByRepoAndNumber),
-    running: pullRequests.filter((pr) => pr.state === "running").sort(sortByRepoAndNumber)
+    running: pullRequests.filter((pr) => pr.state === "running").sort(sortByRepoAndNumber),
+    conflicts: pullRequests.filter((pr) => pr.hasConflict).sort(sortByRepoAndNumber)
   };
   const summary = {
     repos: repos.length || new Set(pullRequests.map((pr) => pr.repo)).size,
     passingPrs: prGroups.pass.length,
     failingPrs: prGroups.fail.length,
     runningPrs: prGroups.running.length,
+    conflictPrs: prGroups.conflicts.length,
     runningCd: runningCd.length,
     runningDeployments: runningDeployments.length,
     busyRunners: busyRunners.length,

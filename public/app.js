@@ -1,4 +1,6 @@
 const STORAGE_KEY = "pr-deck:v1";
+const INBOX_KEY = "pr-deck:inbox:v1";
+const INBOX_MAX = 60;
 
 const persisted = loadPersisted();
 
@@ -12,7 +14,9 @@ const state = {
   refreshTimer: null,
   countdownTimer: null,
   nextRefreshAt: null,
-  refreshReason: ""
+  refreshReason: "",
+  inboxOpen: false,
+  inbox: loadInbox()
 };
 
 const views = {
@@ -22,6 +26,13 @@ const views = {
     empty: "Nothing failing. Quiet day on the desk.",
     color: "red",
     rows: (data) => data.pullRequests.fail
+  },
+  conflicts: {
+    kicker: "Merge conflicts",
+    title: "PRs blocked until rebased",
+    empty: "No PRs with merge conflicts.",
+    color: "red",
+    rows: (data) => data.pullRequests.conflicts || []
   },
   running: {
     kicker: "Open PRs with CI running",
@@ -67,7 +78,7 @@ const views = {
   }
 };
 
-const viewOrder = ["fail", "running", "pass", "runningCd", "deployments", "runners", "failedCd"];
+const viewOrder = ["fail", "conflicts", "running", "pass", "runningCd", "deployments", "runners", "failedCd"];
 
 const els = {
   account: document.querySelector("#account"),
@@ -90,12 +101,21 @@ const els = {
   filter: document.querySelector("#filter"),
   filterClear: document.querySelector("#filterClear"),
   filterCount: document.querySelector("#filterCount"),
-  toastRegion: document.querySelector("#toastRegion")
+  toastRegion: document.querySelector("#toastRegion"),
+  inboxToggle: document.querySelector("#inboxToggle"),
+  inboxBadge: document.querySelector("#inboxBadge"),
+  inboxPanel: document.querySelector("#inboxPanel"),
+  inboxHeading: document.querySelector("#inboxHeading"),
+  inboxList: document.querySelector("#inboxList"),
+  inboxEmpty: document.querySelector("#inboxEmpty"),
+  inboxMarkAll: document.querySelector("#inboxMarkAll"),
+  inboxClear: document.querySelector("#inboxClear")
 };
 
 const metricIds = {
   passingPrs: "metricPassing",
   failingPrs: "metricFailing",
+  conflictPrs: "metricConflicts",
   runningPrs: "metricRunning",
   runningCd: "metricCd",
   failedCd: "metricFailedCd",
@@ -105,6 +125,7 @@ const metricIds = {
 const navIds = {
   pass: "navPass",
   fail: "navFail",
+  conflicts: "navConflicts",
   running: "navRunning",
   runningCd: "navRunningCd",
   deployments: "navDeployments",
@@ -124,6 +145,21 @@ function loadPersisted() {
   } catch {
     return {};
   }
+}
+
+function loadInbox() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(INBOX_KEY) || "[]");
+    return Array.isArray(raw) ? raw.slice(0, INBOX_MAX) : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveInbox() {
+  try {
+    localStorage.setItem(INBOX_KEY, JSON.stringify(state.inbox.slice(0, INBOX_MAX)));
+  } catch {}
 }
 
 function persist() {
@@ -205,10 +241,16 @@ function prKey(row) {
 }
 
 function buildActivitySnapshot(data) {
+  const allPrs = [
+    ...(data?.pullRequests?.pass || []),
+    ...(data?.pullRequests?.fail || []),
+    ...(data?.pullRequests?.running || [])
+  ];
   return {
     includeCd: Boolean(data?.options?.includeCd),
     ci: new Map((data?.pullRequests?.running || []).map((row) => [prKey(row), row])),
-    cd: new Map((data?.cd?.running || []).map((row) => [actionKey(row), row]))
+    cd: new Map((data?.cd?.running || []).map((row) => [actionKey(row), row])),
+    conflicts: new Set(allPrs.filter((row) => row.hasConflict).map((row) => prKey(row)))
   };
 }
 
@@ -282,7 +324,34 @@ function showToast(title, body) {
   }, 8000);
 }
 
-async function sendPopup(title, body, tag) {
+function recordInbox(entry) {
+  const id = `${entry.tag || entry.title}:${Date.now()}:${Math.random().toString(36).slice(2, 6)}`;
+  const item = {
+    id,
+    tag: entry.tag || "",
+    kind: entry.kind || "info",
+    tone: entry.tone || "info",
+    title: entry.title,
+    body: entry.body,
+    url: entry.url || "",
+    at: new Date().toISOString(),
+    read: false
+  };
+  state.inbox.unshift(item);
+  state.inbox = state.inbox.slice(0, INBOX_MAX);
+  saveInbox();
+  renderInbox();
+}
+
+async function sendPopup(title, body, tag, options = {}) {
+  recordInbox({
+    title,
+    body,
+    tag,
+    url: options.url || "",
+    kind: options.kind || "info",
+    tone: options.tone || "info"
+  });
   if (!state.notifications) return;
   showToast(title, body);
   await showBrowserNotification(title, body, tag);
@@ -305,7 +374,30 @@ function notifyCompletedActions(previousSnapshot, data) {
     sendPopup(
       `CI ${stateLabel}`,
       `${completed.repo} ${completed.numberLabel}: ${completed.title}`,
-      `ci:${key}:${stateLabel}`
+      `ci:${key}:${stateLabel}`,
+      {
+        url: completed.url,
+        kind: "ci",
+        tone: completed.state === "pass" ? "success" : "danger"
+      }
+    );
+  }
+
+  const allPrs = [
+    ...(data?.pullRequests?.pass || []),
+    ...(data?.pullRequests?.fail || []),
+    ...(data?.pullRequests?.running || [])
+  ];
+  const prByKey = new Map(allPrs.map((row) => [prKey(row), row]));
+  for (const key of nextSnapshot.conflicts) {
+    if (previousSnapshot.conflicts?.has(key)) continue;
+    const pr = prByKey.get(key);
+    if (!pr) continue;
+    sendPopup(
+      "Merge conflict",
+      `${pr.repo} ${pr.numberLabel}: ${pr.title}`,
+      `conflict:${key}`,
+      { url: pr.url, kind: "conflict", tone: "danger" }
     );
   }
 
@@ -318,7 +410,12 @@ function notifyCompletedActions(previousSnapshot, data) {
     sendPopup(
       `CD ${statusLabel}`,
       `${previous.repo} ${previous.workflow} ${previous.runNumber}: ${previous.title || previous.branch}`,
-      `cd:${key}:${statusLabel}`
+      `cd:${key}:${statusLabel}`,
+      {
+        url: failed?.url || previous.url,
+        kind: "cd",
+        tone: failed ? "danger" : "success"
+      }
     );
   }
 }
@@ -520,15 +617,35 @@ function renderRow(row, viewKey, view) {
 }
 
 function renderPrRow(row, view) {
-  const detail = row.runningChecks?.length ? row.runningChecks.join(", ") : `${row.checkCount} checks complete`;
+  const detail = row.runningChecks?.length
+    ? row.runningChecks.join(", ")
+    : row.checkCount
+    ? `${row.checkCount} checks complete`
+    : "no checks reported";
+  const stateLabel = row.checkCount ? row.state.toUpperCase() : "NO CI";
+  const conflictBadge = row.hasConflict
+    ? `<span class="conflict-pill" title="Branch has merge conflicts that block this PR">
+         <svg viewBox="0 0 24 24" aria-hidden="true">
+           <path d="M12 3 2 21h20L12 3Zm0 6v6m0 3v.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+         </svg>
+         Conflict
+       </span>`
+    : "";
+  const draftBadge = row.isDraft
+    ? `<span class="draft-pill" title="Draft pull request">Draft</span>`
+    : "";
   return `
-    <article class="row" data-href="${escapeHtml(row.url || "")}" style="--accent: var(--${view.color}); --soft: var(--${view.color}-soft);">
+    <article class="row${row.hasConflict ? " row-conflict" : ""}" data-href="${escapeHtml(row.url || "")}" style="--accent: var(--${view.color}); --soft: var(--${view.color}-soft);">
       <div class="row-main">
         <div class="repo">${escapeHtml(row.repo)}</div>
         <div class="title">${escapeHtml(row.title)}</div>
       </div>
       <div class="meta">${escapeHtml(row.numberLabel)} · @${escapeHtml(row.author)}</div>
-      <div class="tag">${escapeHtml(row.state.toUpperCase())}</div>
+      <div class="tag-group">
+        <span class="tag">${escapeHtml(stateLabel)}</span>
+        ${conflictBadge}
+        ${draftBadge}
+      </div>
       <div class="meta">${escapeHtml(detail)}</div>
       <a class="open-link" href="${escapeHtml(row.url)}" target="_blank" rel="noreferrer">Open PR</a>
     </article>
@@ -586,6 +703,139 @@ function setView(view) {
   state.view = view;
   persist();
   render();
+}
+
+/* —— inbox —— */
+function unreadInboxCount() {
+  return state.inbox.reduce((n, item) => n + (item.read ? 0 : 1), 0);
+}
+
+function relativeTime(value) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  const diff = Math.max(0, Date.now() - date.getTime());
+  const s = Math.round(diff / 1000);
+  if (s < 30) return "just now";
+  if (s < 60) return `${s}s`;
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m}m`;
+  const h = Math.round(m / 60);
+  if (h < 24) return `${h}h`;
+  const d = Math.round(h / 24);
+  return `${d}d`;
+}
+
+function inboxIconFor(kind) {
+  if (kind === "ci") return "CI";
+  if (kind === "cd") return "CD";
+  if (kind === "conflict") return "⚠";
+  return "•";
+}
+
+function renderInbox() {
+  const unread = unreadInboxCount();
+  const total = state.inbox.length;
+
+  if (unread > 0) {
+    els.inboxBadge.textContent = unread > 99 ? "99+" : String(unread);
+    els.inboxBadge.classList.remove("hidden");
+    els.inboxToggle.classList.add("has-unread");
+  } else {
+    els.inboxBadge.classList.add("hidden");
+    els.inboxToggle.classList.remove("has-unread");
+  }
+  els.inboxToggle.setAttribute(
+    "aria-label",
+    unread > 0 ? `Open notification inbox (${unread} unread)` : "Open notification inbox"
+  );
+
+  if (total === 0) {
+    els.inboxHeading.textContent = "No notifications yet";
+  } else if (unread === 0) {
+    els.inboxHeading.textContent = `${total} · all read`;
+  } else {
+    els.inboxHeading.textContent = `${unread} new · ${total} total`;
+  }
+
+  els.inboxMarkAll.disabled = unread === 0;
+  els.inboxClear.disabled = total === 0;
+  els.inboxEmpty.classList.toggle("hidden", total > 0);
+
+  if (!state.inboxOpen) return;
+
+  els.inboxList.innerHTML = state.inbox
+    .map(
+      (item) => `
+        <a
+          class="inbox-item tone-${escapeHtml(item.tone || "info")}${item.read ? " is-read" : ""}"
+          data-id="${escapeHtml(item.id)}"
+          ${item.url ? `href="${escapeHtml(item.url)}" target="_blank" rel="noreferrer"` : 'href="#" data-noopen="true"'}
+          role="listitem"
+        >
+          <span class="inbox-kind">${escapeHtml(inboxIconFor(item.kind))}</span>
+          <span class="inbox-body">
+            <span class="inbox-row-title">${escapeHtml(item.title)}</span>
+            <span class="inbox-row-meta">${escapeHtml(item.body || "")}</span>
+          </span>
+          <span class="inbox-time" title="${escapeHtml(formatTime(item.at))}">${escapeHtml(relativeTime(item.at))}</span>
+        </a>
+      `
+    )
+    .join("");
+}
+
+function openInbox() {
+  state.inboxOpen = true;
+  els.inboxPanel.classList.remove("hidden");
+  els.inboxPanel.setAttribute("aria-hidden", "false");
+  els.inboxToggle.setAttribute("aria-expanded", "true");
+  renderInbox();
+}
+
+function closeInbox() {
+  if (!state.inboxOpen) return;
+  state.inboxOpen = false;
+  els.inboxPanel.classList.add("hidden");
+  els.inboxPanel.setAttribute("aria-hidden", "true");
+  els.inboxToggle.setAttribute("aria-expanded", "false");
+}
+
+function toggleInbox() {
+  if (state.inboxOpen) {
+    closeInbox();
+  } else {
+    openInbox();
+  }
+}
+
+function markAllInboxRead() {
+  let changed = false;
+  for (const item of state.inbox) {
+    if (!item.read) {
+      item.read = true;
+      changed = true;
+    }
+  }
+  if (changed) {
+    saveInbox();
+    renderInbox();
+  }
+}
+
+function clearInbox() {
+  if (!state.inbox.length) return;
+  state.inbox = [];
+  saveInbox();
+  renderInbox();
+}
+
+function markInboxItemRead(id) {
+  const item = state.inbox.find((entry) => entry.id === id);
+  if (!item || item.read) return;
+  item.read = true;
+  saveInbox();
+  renderInbox();
 }
 
 function setMode(mode) {
@@ -667,6 +917,26 @@ els.notifyTest.addEventListener("click", async () => {
 });
 els.jobs.addEventListener("change", refresh);
 
+els.inboxToggle.addEventListener("click", (event) => {
+  event.stopPropagation();
+  toggleInbox();
+});
+els.inboxMarkAll.addEventListener("click", markAllInboxRead);
+els.inboxClear.addEventListener("click", clearInbox);
+els.inboxPanel.addEventListener("click", (event) => {
+  const item = event.target.closest(".inbox-item");
+  if (!item) return;
+  if (item.dataset.noopen === "true") {
+    event.preventDefault();
+  }
+  markInboxItemRead(item.dataset.id);
+});
+document.addEventListener("click", (event) => {
+  if (!state.inboxOpen) return;
+  if (event.target.closest("#inboxPanel") || event.target.closest("#inboxToggle")) return;
+  closeInbox();
+});
+
 els.filter.addEventListener("input", (event) => {
   state.filter = event.target.value;
   persist();
@@ -705,6 +975,13 @@ document.addEventListener("keydown", (event) => {
     return;
   }
 
+  if (event.key === "Escape" && state.inboxOpen) {
+    event.preventDefault();
+    closeInbox();
+    els.inboxToggle.focus();
+    return;
+  }
+
   if (inField) return;
   if (event.metaKey || event.ctrlKey || event.altKey) return;
 
@@ -721,6 +998,12 @@ document.addEventListener("keydown", (event) => {
     return;
   }
 
+  if (event.key.toLowerCase() === "n") {
+    event.preventDefault();
+    toggleInbox();
+    return;
+  }
+
   const n = Number(event.key);
   if (Number.isInteger(n) && n >= 1 && n <= viewOrder.length) {
     event.preventDefault();
@@ -731,5 +1014,6 @@ document.addEventListener("keydown", (event) => {
 /* —— restore persisted state into the form —— */
 els.filter.value = state.filter;
 syncNotificationControl();
+renderInbox();
 ensureCountdownTimer();
 refresh();

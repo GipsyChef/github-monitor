@@ -65,12 +65,52 @@
             <span>Notify</span>
           </label>
           <button id="notifyTest" class="notify-test" type="button" title="Send a test notification">Test</button>
+          <button
+            id="inboxToggle"
+            class="inbox-toggle"
+            type="button"
+            aria-haspopup="dialog"
+            aria-expanded="false"
+            aria-controls="inboxPanel"
+            aria-label="Open notification inbox"
+            title="Notifications (N)"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M6 8a6 6 0 0 1 12 0c0 3.5 1 4.8 2 6H4c1-1.2 2-2.5 2-6Z" />
+              <path d="M10 18a2 2 0 0 0 4 0" />
+            </svg>
+            <span id="inboxBadge" class="inbox-badge hidden" aria-hidden="true">0</span>
+          </button>
           <button id="refresh" class="refresh" type="button" aria-label="Refresh now" title="Refresh (R)">
             <svg viewBox="0 0 24 24" aria-hidden="true">
               <path d="M21 12a9 9 0 0 1-15.5 6.2M3 12A9 9 0 0 1 18.5 5.8M18 2v5h-5M6 22v-5h5" />
             </svg>
           </button>
         </section>
+
+        <aside
+          id="inboxPanel"
+          class="inbox-panel hidden"
+          role="dialog"
+          aria-modal="false"
+          aria-label="Notifications"
+          aria-hidden="true"
+        >
+          <header class="inbox-head">
+            <div class="inbox-title">
+              <p>Inbox</p>
+              <h3 id="inboxHeading">No notifications yet</h3>
+            </div>
+            <div class="inbox-actions">
+              <button id="inboxMarkAll" class="inbox-action" type="button">Mark all read</button>
+              <button id="inboxClear" class="inbox-action inbox-action-danger" type="button">Clear</button>
+            </div>
+          </header>
+          <div id="inboxList" class="inbox-list" role="list"></div>
+          <p id="inboxEmpty" class="inbox-empty">
+            CI &amp; CD completions and new conflicts will appear here.
+          </p>
+        </aside>
       </header>
 
       <div class="meta-strip" aria-live="polite">
@@ -94,7 +134,7 @@
         </span>
         <span class="meta-spacer"></span>
         <span class="meta-hint" aria-hidden="true">
-          <kbd>/</kbd> filter <kbd>1</kbd>–<kbd>7</kbd> view <kbd>R</kbd> refresh
+          <kbd>/</kbd> filter <kbd>1</kbd>–<kbd>8</kbd> view <kbd>N</kbd> inbox <kbd>R</kbd> refresh
         </span>
       </div>
 
@@ -107,6 +147,10 @@
           <button class="metric metric-red" type="button" data-view="fail" aria-label="Show failing CI">
             <span class="metric-label">Failing CI</span>
             <strong id="metricFailing">0</strong>
+          </button>
+          <button class="metric metric-conflict" type="button" data-view="conflicts" aria-label="Show PRs with merge conflicts">
+            <span class="metric-label">Conflicts</span>
+            <strong id="metricConflicts">0</strong>
           </button>
           <button class="metric metric-amber" type="button" data-view="running" aria-label="Show CI in progress">
             <span class="metric-label">CI Running</span>
@@ -139,6 +183,11 @@
               <span class="dot red"></span>
               Failing CI
               <strong id="navFail">0</strong>
+            </button>
+            <button class="rail-item" type="button" data-view="conflicts">
+              <span class="dot conflict"></span>
+              Conflicts
+              <strong id="navConflicts">0</strong>
             </button>
             <button class="rail-item" type="button" data-view="running">
               <span class="dot amber"></span>
