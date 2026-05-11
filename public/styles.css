@@ -174,7 +174,7 @@ kbd {
   box-shadow: 0 4px 10px -6px rgba(20, 24, 31, 0.5);
 }
 
-.switch, .jobs, .refresh {
+.switch, .jobs, .notify-test, .refresh {
   min-height: 32px;
   border: 1px solid var(--line-strong);
   border-radius: var(--radius);
@@ -194,6 +194,22 @@ kbd {
 }
 .switch:hover { border-color: var(--ink); }
 .switch input { width: 13px; height: 13px; accent-color: var(--ink); }
+
+.notify-test {
+  padding: 0 11px;
+  color: var(--muted-strong);
+  font-size: 12px;
+  font-weight: 700;
+  transition: border-color 160ms ease, color 160ms ease;
+}
+.notify-test:hover:not(:disabled) {
+  border-color: var(--ink);
+  color: var(--ink);
+}
+.notify-test:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
 
 .jobs {
   display: inline-flex;

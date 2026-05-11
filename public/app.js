@@ -77,6 +77,7 @@ const els = {
   includeRepoRunners: document.querySelector("#includeRepoRunners"),
   autoRefresh: document.querySelector("#autoRefresh"),
   notifications: document.querySelector("#notifications"),
+  notifyTest: document.querySelector("#notifyTest"),
   jobs: document.querySelector("#jobs"),
   refresh: document.querySelector("#refresh"),
   nextRefresh: document.querySelector("#nextRefresh"),
@@ -113,6 +114,9 @@ const navIds = {
 
 let lastGeneratedAt = null;
 let generatedTicker = null;
+const notificationWorkerPromise = "serviceWorker" in navigator
+  ? navigator.serviceWorker.register("/sw.js").then(() => navigator.serviceWorker.ready).catch(() => null)
+  : Promise.resolve(null);
 
 function loadPersisted() {
   try {
@@ -208,11 +212,59 @@ function buildActivitySnapshot(data) {
   };
 }
 
-function requestNotificationPermission() {
-  if (!("Notification" in window) || Notification.permission !== "default") return;
+function notificationPermission() {
+  if (!("Notification" in window)) return "unsupported";
+  return Notification.permission;
+}
+
+async function requestNotificationPermission() {
+  if (notificationPermission() !== "default") return notificationPermission();
   try {
-    Notification.requestPermission().catch(() => {});
-  } catch {}
+    return await Notification.requestPermission();
+  } catch {
+    return notificationPermission();
+  }
+}
+
+function syncNotificationControl() {
+  const permission = notificationPermission();
+  els.notifications.disabled = permission === "unsupported";
+  els.notifyTest.disabled = permission === "unsupported" || permission === "denied";
+  if (permission === "denied" || permission === "unsupported") {
+    els.notifications.checked = false;
+    state.notifications = false;
+    persist();
+  } else {
+    els.notifications.checked = state.notifications;
+  }
+}
+
+async function showBrowserNotification(title, body, tag) {
+  if (notificationPermission() !== "granted") return false;
+  const registration = await notificationWorkerPromise;
+  try {
+    if (registration?.showNotification) {
+      await registration.showNotification(title, {
+        body,
+        tag,
+        renotify: true,
+        icon: "/favicon.svg",
+        badge: "/favicon.svg",
+        data: { url: window.location.href }
+      });
+      return true;
+    }
+    const notification = new Notification(title, {
+      body,
+      tag,
+      renotify: true,
+      icon: "/favicon.svg"
+    });
+    setTimeout(() => notification.close(), 10000);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function showToast(title, body) {
@@ -230,18 +282,10 @@ function showToast(title, body) {
   }, 8000);
 }
 
-function sendPopup(title, body, tag) {
+async function sendPopup(title, body, tag) {
   if (!state.notifications) return;
-  if ("Notification" in window && Notification.permission === "granted") {
-    const notification = new Notification(title, {
-      body,
-      tag,
-      renotify: true
-    });
-    setTimeout(() => notification.close(), 10000);
-    return;
-  }
   showToast(title, body);
+  await showBrowserNotification(title, body, tag);
 }
 
 function notifyCompletedActions(previousSnapshot, data) {
@@ -580,10 +624,46 @@ els.autoRefresh.addEventListener("change", () => {
     renderRefreshStatus();
   }
 });
-els.notifications.addEventListener("change", () => {
+els.notifications.addEventListener("change", async () => {
   state.notifications = els.notifications.checked;
   persist();
-  if (state.notifications) requestNotificationPermission();
+  if (state.notifications) {
+    const permission = await requestNotificationPermission();
+    if (permission === "denied" || permission === "unsupported") {
+      state.notifications = false;
+      persist();
+      syncNotificationControl();
+      showToast("Notifications blocked", "Allow notifications for this site in your browser settings.");
+      return;
+    }
+    if (permission === "granted") {
+      sendPopup("Notifications enabled", "CI/CD completion alerts are active.", "notifications:test");
+    } else {
+      showToast("In-app alerts enabled", "Browser notification permission was not granted.");
+    }
+  }
+  syncNotificationControl();
+});
+els.notifyTest.addEventListener("click", async () => {
+  state.notifications = true;
+  persist();
+  syncNotificationControl();
+  const permission = await requestNotificationPermission();
+  if (permission !== "granted") {
+    showToast("Notifications blocked", "Chrome did not grant browser notification permission.");
+    syncNotificationControl();
+    return;
+  }
+  const displayed = await showBrowserNotification(
+    "PR Command Deck test",
+    "Browser notifications are wired up.",
+    `notifications:test:${Date.now()}`
+  );
+  showToast(
+    displayed ? "Test notification sent" : "Native notification failed",
+    displayed ? "If no popup appeared, check macOS Focus or Chrome notification settings." : "In-app alerts will still appear here."
+  );
+  syncNotificationControl();
 });
 els.jobs.addEventListener("change", refresh);
 
@@ -650,7 +730,6 @@ document.addEventListener("keydown", (event) => {
 
 /* —— restore persisted state into the form —— */
 els.filter.value = state.filter;
-els.notifications.checked = state.notifications;
-if (state.notifications) requestNotificationPermission();
+syncNotificationControl();
 ensureCountdownTimer();
 refresh();
