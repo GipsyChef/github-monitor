@@ -60,6 +60,10 @@
             <input id="autoRefresh" type="checkbox" checked />
             <span>Auto</span>
           </label>
+          <label class="switch" title="Browser notifications when CI/CD work completes">
+            <input id="notifications" type="checkbox" checked />
+            <span>Notify</span>
+          </label>
           <button id="refresh" class="refresh" type="button" aria-label="Refresh now" title="Refresh (R)">
             <svg viewBox="0 0 24 24" aria-hidden="true">
               <path d="M21 12a9 9 0 0 1-15.5 6.2M3 12A9 9 0 0 1 18.5 5.8M18 2v5h-5M6 22v-5h5" />
@@ -187,6 +191,7 @@
         </section>
       </main>
     </div>
+    <div id="toastRegion" class="toast-region" aria-live="polite" aria-atomic="false"></div>
 
     <script src="/app.js" type="module"></script>
   </body>

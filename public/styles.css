@@ -407,6 +407,49 @@ button.metric.active::before { width: 4px; }
   font-weight: 600;
 }
 
+.toast-region {
+  position: fixed;
+  right: 18px;
+  bottom: 18px;
+  z-index: 80;
+  display: grid;
+  gap: 8px;
+  width: min(360px, calc(100vw - 36px));
+  pointer-events: none;
+}
+
+.toast {
+  display: grid;
+  gap: 3px;
+  padding: 11px 13px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--paper-strong);
+  box-shadow: var(--shadow-card);
+  color: var(--ink);
+  animation: toast-in 180ms ease-out;
+}
+
+.toast strong {
+  font-family: var(--sans);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.toast span {
+  color: var(--muted-strong);
+  font-family: var(--sans);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.35;
+}
+
+.toast-out {
+  opacity: 0;
+  transform: translateY(6px);
+  transition: opacity 180ms ease, transform 180ms ease;
+}
+
 /* —————————————————————— WORKSPACE / RAIL —————————————————————— */
 .workspace {
   display: grid;
@@ -728,6 +771,13 @@ button.metric.active::before { width: 4px; }
 /* —————————————————————— ANIMATIONS —————————————————————— */
 @keyframes spin {
   to { transform: rotate(360deg); }
+}
+
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {

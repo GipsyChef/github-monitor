@@ -7,6 +7,8 @@ const state = {
   mode: persisted.mode || "all",
   view: persisted.view || "fail",
   filter: persisted.filter || "",
+  notifications: persisted.notifications !== false,
+  activitySnapshot: null,
   refreshTimer: null,
   countdownTimer: null,
   nextRefreshAt: null,
@@ -74,6 +76,7 @@ const els = {
   includeRunners: document.querySelector("#includeRunners"),
   includeRepoRunners: document.querySelector("#includeRepoRunners"),
   autoRefresh: document.querySelector("#autoRefresh"),
+  notifications: document.querySelector("#notifications"),
   jobs: document.querySelector("#jobs"),
   refresh: document.querySelector("#refresh"),
   nextRefresh: document.querySelector("#nextRefresh"),
@@ -85,7 +88,8 @@ const els = {
   viewTitle: document.querySelector("#viewTitle"),
   filter: document.querySelector("#filter"),
   filterClear: document.querySelector("#filterClear"),
-  filterCount: document.querySelector("#filterCount")
+  filterCount: document.querySelector("#filterCount"),
+  toastRegion: document.querySelector("#toastRegion")
 };
 
 const metricIds = {
@@ -122,7 +126,12 @@ function persist() {
   try {
     localStorage.setItem(
       STORAGE_KEY,
-      JSON.stringify({ mode: state.mode, view: state.view, filter: state.filter })
+      JSON.stringify({
+        mode: state.mode,
+        view: state.view,
+        filter: state.filter,
+        notifications: state.notifications
+      })
     );
   } catch {}
 }
@@ -181,6 +190,93 @@ function rowText(row) {
     .flatMap((value) => (Array.isArray(value) ? value : [value]))
     .join(" ")
     .toLowerCase();
+}
+
+function actionKey(row) {
+  return row?.url || [row?.repo, row?.workflow, row?.runNumber, row?.number].filter(Boolean).join(":");
+}
+
+function prKey(row) {
+  return row?.url || `${row?.repo || ""}#${row?.number || ""}`;
+}
+
+function buildActivitySnapshot(data) {
+  return {
+    includeCd: Boolean(data?.options?.includeCd),
+    ci: new Map((data?.pullRequests?.running || []).map((row) => [prKey(row), row])),
+    cd: new Map((data?.cd?.running || []).map((row) => [actionKey(row), row]))
+  };
+}
+
+function requestNotificationPermission() {
+  if (!("Notification" in window) || Notification.permission !== "default") return;
+  try {
+    Notification.requestPermission().catch(() => {});
+  } catch {}
+}
+
+function showToast(title, body) {
+  if (!els.toastRegion) return;
+  const toast = document.createElement("div");
+  toast.className = "toast";
+  toast.innerHTML = `
+    <strong>${escapeHtml(title)}</strong>
+    <span>${escapeHtml(body)}</span>
+  `;
+  els.toastRegion.append(toast);
+  setTimeout(() => {
+    toast.classList.add("toast-out");
+    setTimeout(() => toast.remove(), 220);
+  }, 8000);
+}
+
+function sendPopup(title, body, tag) {
+  if (!state.notifications) return;
+  if ("Notification" in window && Notification.permission === "granted") {
+    const notification = new Notification(title, {
+      body,
+      tag,
+      renotify: true
+    });
+    setTimeout(() => notification.close(), 10000);
+    return;
+  }
+  showToast(title, body);
+}
+
+function notifyCompletedActions(previousSnapshot, data) {
+  if (!previousSnapshot) return;
+  const nextSnapshot = buildActivitySnapshot(data);
+  const completedPrs = [
+    ...(data?.pullRequests?.pass || []),
+    ...(data?.pullRequests?.fail || [])
+  ];
+  const completedPrByKey = new Map(completedPrs.map((row) => [prKey(row), row]));
+
+  for (const [key] of previousSnapshot.ci) {
+    if (nextSnapshot.ci.has(key)) continue;
+    const completed = completedPrByKey.get(key);
+    if (!completed) continue;
+    const stateLabel = completed.state === "pass" ? "passed" : "failed";
+    sendPopup(
+      `CI ${stateLabel}`,
+      `${completed.repo} ${completed.numberLabel}: ${completed.title}`,
+      `ci:${key}:${stateLabel}`
+    );
+  }
+
+  if (!previousSnapshot.includeCd || !nextSnapshot.includeCd) return;
+  const failedCdByKey = new Map((data?.cd?.failed || []).map((row) => [actionKey(row), row]));
+  for (const [key, previous] of previousSnapshot.cd) {
+    if (nextSnapshot.cd.has(key)) continue;
+    const failed = failedCdByKey.get(key);
+    const statusLabel = failed ? `failed (${failed.conclusion})` : "finished";
+    sendPopup(
+      `CD ${statusLabel}`,
+      `${previous.repo} ${previous.workflow} ${previous.runNumber}: ${previous.title || previous.branch}`,
+      `cd:${key}:${statusLabel}`
+    );
+  }
 }
 
 function setLoading(isLoading) {
@@ -277,6 +373,8 @@ async function refresh({ source = "manual" } = {}) {
       }
       throw new Error(data.error || "Unable to refresh dashboard");
     }
+    notifyCompletedActions(state.activitySnapshot, data);
+    state.activitySnapshot = buildActivitySnapshot(data);
     state.data = data;
     render();
     scheduleAutoRefresh(data);
@@ -482,6 +580,11 @@ els.autoRefresh.addEventListener("change", () => {
     renderRefreshStatus();
   }
 });
+els.notifications.addEventListener("change", () => {
+  state.notifications = els.notifications.checked;
+  persist();
+  if (state.notifications) requestNotificationPermission();
+});
 els.jobs.addEventListener("change", refresh);
 
 els.filter.addEventListener("input", (event) => {
@@ -547,5 +650,7 @@ document.addEventListener("keydown", (event) => {
 
 /* —— restore persisted state into the form —— */
 els.filter.value = state.filter;
+els.notifications.checked = state.notifications;
+if (state.notifications) requestNotificationPermission();
 ensureCountdownTimer();
 refresh();

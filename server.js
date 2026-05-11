@@ -68,6 +68,7 @@ const PR_SEARCH_GRAPHQL = `
 `;
 
 const CD_WORKFLOW_PATTERN = /(^|[^A-Za-z0-9])(cd|deploy|deployment|release|publish)([^A-Za-z0-9]|$)/i;
+const FAILED_CD_MAX_AGE_MS = 3 * 24 * 60 * 60 * 1000;
 const RUNNING_RUN_STATUSES = new Set(["queued", "in_progress", "waiting", "requested", "pending"]);
 const FAILED_RUN_CONCLUSIONS = new Set(["failure", "cancelled", "timed_out", "action_required", "startup_failure"]);
 const FAILED_CHECK_CONCLUSIONS = new Set(["FAILURE", "ERROR", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE"]);
@@ -324,6 +325,11 @@ function parseJobs(value) {
   return Math.min(jobs, 16);
 }
 
+function isWithinFailedCdWindow(value) {
+  const time = new Date(value).getTime();
+  return Number.isFinite(time) && Date.now() - time <= FAILED_CD_MAX_AGE_MS;
+}
+
 function checkFinished(check) {
   if (check.__typename === "CheckRun") return check.status === "COMPLETED";
   return check.state !== "PENDING" && check.state !== "EXPECTED";
@@ -466,9 +472,10 @@ async function fetchCdForRepo(repo) {
     try {
       const completedRuns = await fetchWorkflowRuns(repo, workflow.id, { per_page: 1, status: "completed" });
       const latest = completedRuns[0];
-      if (latest && FAILED_RUN_CONCLUSIONS.has(latest.conclusion)) {
+      const failedAt = latest?.updated_at || latest?.created_at;
+      if (latest && FAILED_RUN_CONCLUSIONS.has(latest.conclusion) && isWithinFailedCdWindow(failedAt)) {
         failed.push({
-          createdAt: latest.created_at,
+          createdAt: failedAt,
           repo,
           workflow: workflow.name,
           runNumber: `#${latest.run_number}`,
