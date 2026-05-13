@@ -21,12 +21,17 @@ Prerequisites:
 - A GitHub token exposed as `GITHUB_TOKEN` or `GH_TOKEN`
 - Or GitHub CLI authenticated locally with `gh auth login`
 
-Start the dashboard:
+Install from GitHub:
 
 ```bash
 git clone https://github.com/GipsyChef/github-monitor.git
 cd github-monitor
 npm ci
+```
+
+Start the dashboard:
+
+```bash
 npm start
 ```
 
@@ -53,6 +58,18 @@ For a guided local launch that checks Node.js, GitHub CLI auth, and port availab
 ```bash
 npm run dev
 ```
+
+## Install
+
+GitHub Monitor is distributed as source code. Clone the repository and install the locked npm dependency graph:
+
+```bash
+git clone https://github.com/GipsyChef/github-monitor.git
+cd github-monitor
+npm ci
+```
+
+There are currently no runtime npm dependencies beyond Node.js itself; `npm ci` verifies the lockfile and prepares the project the same way CI does.
 
 ## What It Shows
 
@@ -151,6 +168,12 @@ Merge requests must include JSON like `{"repo":"owner/name","number":123}`. The 
 The server binds to `127.0.0.1` and should stay on a trusted local machine. It uses your GitHub token for API calls and for merges triggered from the dashboard, so do not expose it to an untrusted network.
 
 Never commit `.env` files, real tokens, screenshots with private repository data, or logs containing private repository names.
+
+## Support
+
+Use GitHub issues for reproducible bugs and focused feature requests. For suspected security vulnerabilities, follow [SECURITY.md](SECURITY.md) instead of opening a public issue.
+
+This is a small local utility, so support is best effort. Hosted multi-user deployment support and debugging private repositories without a minimal reproduction are out of scope.
 
 ## Notes
 
