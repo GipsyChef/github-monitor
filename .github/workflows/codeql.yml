@@ -20,6 +20,7 @@ concurrency:
 jobs:
   analyze:
     name: Analyze JavaScript
+    if: ${{ !github.event.repository.private }}
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository

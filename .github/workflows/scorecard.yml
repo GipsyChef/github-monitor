@@ -18,6 +18,7 @@ concurrency:
 jobs:
   scorecard:
     name: Scorecard
+    if: ${{ !github.event.repository.private }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
