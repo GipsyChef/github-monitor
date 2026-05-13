@@ -18,14 +18,14 @@ bold "GitHub Operations Bureau"
 dim  "Port ${PORT} · ${URL}"
 echo
 
-# 1. node >= 20
+# 1. node >= 22
 if ! command -v node >/dev/null 2>&1; then
-  red "✗ node is not installed. Install Node.js 20+ (e.g. \`brew install node\`)."
+  red "✗ node is not installed. Install Node.js 22+ (e.g. \`brew install node\`)."
   exit 1
 fi
 NODE_MAJOR=$(node -p "process.versions.node.split('.')[0]")
-if [ "${NODE_MAJOR}" -lt 20 ]; then
-  red "✗ node ${NODE_MAJOR} found — this project needs node 20 or newer."
+if [ "${NODE_MAJOR}" -lt 22 ]; then
+  red "✗ node ${NODE_MAJOR} found — this project needs node 22 or newer."
   exit 1
 fi
 green "✓ node $(node -v)"

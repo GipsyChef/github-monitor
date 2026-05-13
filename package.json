@@ -1,15 +1,37 @@
 {
   "name": "github-monitor",
   "version": "1.0.0",
-  "private": true,
   "description": "Local visual dashboard for open GitHub PRs, CI, CD, deployments, and runners.",
   "type": "module",
+  "license": "MIT",
+  "author": "Yoni",
+  "homepage": "https://github.com/GipsyChef/github-monitor#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/GipsyChef/github-monitor.git"
+  },
+  "bugs": {
+    "url": "https://github.com/GipsyChef/github-monitor/issues"
+  },
+  "keywords": [
+    "github",
+    "pull-requests",
+    "ci",
+    "cd",
+    "dashboard"
+  ],
+  "files": [
+    "public/",
+    "server.js",
+    "start.sh"
+  ],
   "scripts": {
     "start": "node server.js",
     "dev": "./start.sh",
-    "check": "node --check server.js"
+    "check": "node --check server.js",
+    "test": "npm run check"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   }
 }

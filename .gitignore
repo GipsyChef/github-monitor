@@ -1,0 +1,14 @@
+.DS_Store
+.env
+.env.*
+!.env.example
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+coverage/
+dist/
+build/
+.nyc_output/
+.cache/

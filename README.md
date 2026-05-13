@@ -1,38 +1,32 @@
 # GitHub Monitor
 
-A local visual dashboard for the same operational view provided by `/Users/cigan/Documents/projects/aws_scripts/open_prs.sh`.
+GitHub Monitor is a local dashboard for keeping track of open pull requests, CI status, CD workflows, deployments, and self-hosted runner activity across your GitHub account and organizations.
 
-It calls GitHub's REST and GraphQL APIs directly, scans open PRs, classifies PRs by latest CI status, and optionally audits CD workflows, running deployments, and busy self-hosted runners.
+It is built for the common maintainer problem: you have work spread across several repositories, browser tabs, Actions pages, and notification streams, and you need one place that answers:
 
-## Stack
+- Which PRs are failing?
+- Which PRs are still running checks?
+- Which passing PRs are ready to merge?
+- Which deploy or release workflows are running or recently failed?
+- Are any self-hosted runners busy?
+- Is GitHub API quota getting tight?
 
-- Backend: dependency-free Node HTTP server
-- Frontend: dependency-free HTML/CSS/JavaScript
-- Data source: direct GitHub REST and GraphQL API calls
+The app runs only on your machine. It talks directly to GitHub's REST and GraphQL APIs, stores no GitHub token, and keeps notification history in browser localStorage.
 
-This intentionally avoids storing GitHub tokens, adding a database, or introducing app auth. The local server reads `GITHUB_TOKEN` or `GH_TOKEN`; if neither is set, it uses `gh auth token` once to discover your existing local token. Merging PRs from the dashboard uses the same token and requires write access to the target repository.
+## Quick Start
 
-## Prerequisites
+Prerequisites:
 
-- Node.js 20+
-- A GitHub token with access to the repositories you want to scan, provided as `GITHUB_TOKEN` or `GH_TOKEN`
-- Optional fallback: GitHub CLI authenticated locally, so the server can read `gh auth token`
+- Node.js 22 or newer
+- A GitHub token exposed as `GITHUB_TOKEN` or `GH_TOKEN`
+- Or GitHub CLI authenticated locally with `gh auth login`
 
-Check CLI fallback auth:
-
-```bash
-gh auth status
-```
-
-Run with an explicit token:
+Start the dashboard:
 
 ```bash
-GITHUB_TOKEN=github_pat_... npm start
-```
-
-## Run
-
-```bash
+git clone https://github.com/GipsyChef/github-monitor.git
+cd github-monitor
+npm ci
 npm start
 ```
 
@@ -42,10 +36,80 @@ Open:
 http://127.0.0.1:4177
 ```
 
-Use a different port:
+Use an explicit token:
+
+```bash
+GITHUB_TOKEN=<your-token> npm start
+```
+
+Use another port:
 
 ```bash
 PORT=4180 npm start
+```
+
+For a guided local launch that checks Node.js, GitHub CLI auth, and port availability:
+
+```bash
+npm run dev
+```
+
+## What It Shows
+
+- Open PRs grouped by passing, failing, running, and merge conflict states
+- Optional CD/deploy/release/publish workflow audit
+- CD runs that finished in the last 24 hours
+- Latest failed CD runs from the last 3 days
+- Running GitHub deployments
+- Busy organization and optional repository-level self-hosted runners
+- GitHub API request count, remaining quota, and reset time
+- Adaptive next-refresh timing based on activity and API quota
+- Browser notifications and an in-app inbox for CI/CD completions and new conflicts
+
+The merge action is intentionally guarded: before merging, the server re-checks the PR, rejects drafts, conflicts, and PRs without completed passing CI, then deletes the PR head branch after a successful merge.
+
+## Stack
+
+- Backend: dependency-free Node HTTP server
+- Frontend: dependency-free HTML/CSS/JavaScript
+- Data source: direct GitHub REST and GraphQL API calls
+
+This intentionally avoids storing GitHub tokens, adding a database, or introducing app auth. The local server reads `GITHUB_TOKEN` or `GH_TOKEN`; if neither is set, it uses `gh auth token` once to discover your existing local token. Merging PRs from the dashboard uses the same token and requires write access to the target repository.
+
+## Status
+
+GitHub Monitor is a local-first utility. It is not designed as a hosted multi-user service.
+
+## Prerequisites
+
+- Node.js 22+
+- A GitHub token with access to the repositories you want to scan, provided as `GITHUB_TOKEN` or `GH_TOKEN`
+- Optional fallback: GitHub CLI authenticated locally, so the server can read `gh auth token`
+
+Recommended token scopes depend on what you want to see:
+
+- Read-only PR and Actions monitoring needs repository read access.
+- Runner visibility requires Actions runner access for the owner or repository.
+- Merging PRs requires write access to the target repository.
+
+Check CLI fallback auth:
+
+```bash
+gh auth status
+```
+
+## Development
+
+Run the syntax check:
+
+```bash
+npm test
+```
+
+Run the startup helper, which verifies Node.js, GitHub CLI auth, port availability, and opens the dashboard:
+
+```bash
+npm run dev
 ```
 
 ## Dashboard Controls
@@ -82,6 +146,20 @@ GET /api/health
 `mode` can be `all`, `owned`, or `mine`.
 Merge requests must include JSON like `{"repo":"owner/name","number":123}`. The server re-checks the PR before merging, rejects drafts, conflicts, and PRs without completed passing CI, then deletes the PR head branch after a successful merge.
 
+## Security
+
+The server binds to `127.0.0.1` and should stay on a trusted local machine. It uses your GitHub token for API calls and for merges triggered from the dashboard, so do not expose it to an untrusted network.
+
+Never commit `.env` files, real tokens, screenshots with private repository data, or logs containing private repository names.
+
 ## Notes
 
 PRs with no CI checks are hidden, matching the behavior of the original script.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), and [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
+
+## License
+
+MIT. See [LICENSE](LICENSE).

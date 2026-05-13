@@ -1,0 +1,174 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Node.js ${{ matrix.node-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version:
+          - 22.x
+          - 24.x
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run checks
+        run: npm test
+
+      - name: Smoke test local server
+        shell: bash
+        run: |
+          set -euo pipefail
+          PORT=4199 npm start >server.log 2>&1 &
+          server_pid="$!"
+          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+
+          for _ in {1..20}; do
+            if curl -fsS "http://127.0.0.1:4199/api/health"; then
+              exit 0
+            fi
+            sleep 0.5
+          done
+
+          cat server.log
+          exit 1
+
+  repository-policy:
+    name: Repository policy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Validate public repository hygiene
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          required_files=(
+            README.md
+            LICENSE
+            SECURITY.md
+            CONTRIBUTING.md
+            CODE_OF_CONDUCT.md
+            CHANGELOG.md
+            package-lock.json
+          )
+          for file in "${required_files[@]}"; do
+            test -f "$file" || {
+              echo "::error file=$file::Required open source file is missing"
+              exit 1
+            }
+          done
+
+          node --input-type=module <<'NODE'
+          import { readFileSync } from "node:fs";
+
+          const pkg = JSON.parse(readFileSync("package.json", "utf8"));
+          const failures = [];
+
+          if (pkg.private === true) failures.push("package.json must not set private=true");
+          if (pkg.license !== "MIT") failures.push("package.json license must be MIT");
+          if (!pkg.repository?.url?.includes("github.com/GipsyChef/github-monitor")) {
+            failures.push("package.json repository URL must point to this repository");
+          }
+          if (!pkg.scripts?.test) failures.push("package.json must define npm test");
+          if (!pkg.engines?.node || !pkg.engines.node.includes("22")) {
+            failures.push("package.json must require a supported Node.js release line");
+          }
+
+          const readme = readFileSync("README.md", "utf8");
+          for (const heading of ["## Quick Start", "## What It Shows", "## Security", "## Contributing", "## License"]) {
+            if (!readme.includes(heading)) failures.push(`README.md is missing ${heading}`);
+          }
+
+          if (failures.length) {
+            for (const failure of failures) console.error(`::error::${failure}`);
+            process.exit(1);
+          }
+          NODE
+
+          if git ls-files | grep -E '(^|/)\.env($|\.)'; then
+            echo "::error::.env files must not be tracked"
+            exit 1
+          fi
+
+          node --input-type=module <<'NODE'
+          import { execFileSync } from "node:child_process";
+          import { readFileSync } from "node:fs";
+
+          const patterns = [
+            ["GitHub fine-grained token", new RegExp("github_" + "pat_", "i")],
+            ["GitHub classic token", new RegExp("gh" + "[pousr]_", "i")],
+            ["AWS access key", new RegExp("AK" + "IA[0-9A-Z]{16}")],
+            ["private key", /BEGIN (RSA|OPENSSH|EC|DSA|PRIVATE) KEY/]
+          ];
+          const files = execFileSync("git", ["ls-files", "-z"], { encoding: "utf8" })
+            .split("\0")
+            .filter(Boolean);
+          const failures = [];
+
+          for (const file of files) {
+            let text;
+            try {
+              text = readFileSync(file, "utf8");
+            } catch {
+              continue;
+            }
+            for (const [label, pattern] of patterns) {
+              if (pattern.test(text)) failures.push(`${file}: potential ${label}`);
+            }
+          }
+
+          if (failures.length) {
+            for (const failure of failures) console.error(`::error::${failure}`);
+            process.exit(1);
+          }
+          NODE
+
+  package:
+    name: Package and audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24.x
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --audit-level=moderate
+
+      - name: Verify package contents
+        run: npm pack --dry-run

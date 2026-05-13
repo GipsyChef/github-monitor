@@ -1,0 +1,33 @@
+name: Bug report
+description: Report a reproducible problem
+labels:
+  - bug
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: What happened?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Include the dashboard options you used.
+    validations:
+      required: true
+  - type: input
+    id: node
+    attributes:
+      label: Node.js version
+      placeholder: v20.x
+  - type: input
+    id: browser
+    attributes:
+      label: Browser
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Remove tokens, private repository names, and sensitive organization details before posting.
