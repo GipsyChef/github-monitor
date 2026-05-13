@@ -1,6 +1,7 @@
 const STORAGE_KEY = "pr-deck:v1";
 const INBOX_KEY = "pr-deck:inbox:v1";
 const INBOX_MAX = 60;
+const INBOX_TTL_MS = 24 * 60 * 60 * 1000;
 
 const persisted = loadPersisted();
 
@@ -57,6 +58,13 @@ const views = {
     color: "blue",
     rows: (data) => data.cd.running
   },
+  finishedCd: {
+    kicker: "Finished CD Actions",
+    title: "Deploy and release workflows finished in the last day",
+    empty: "No CD actions finished in the last day.",
+    color: "green",
+    rows: (data) => data.cd.finished || []
+  },
   deployments: {
     kicker: "Running Deployments",
     title: "GitHub deployments not finished yet",
@@ -80,7 +88,7 @@ const views = {
   }
 };
 
-const viewOrder = ["fail", "conflicts", "running", "pass", "runningCd", "deployments", "runners", "failedCd"];
+const viewOrder = ["fail", "conflicts", "running", "pass", "runningCd", "finishedCd", "deployments", "runners", "failedCd"];
 
 const els = {
   account: document.querySelector("#account"),
@@ -120,6 +128,7 @@ const metricIds = {
   conflictPrs: "metricConflicts",
   runningPrs: "metricRunning",
   runningCd: "metricCd",
+  finishedCd: "metricFinishedCd",
   failedCd: "metricFailedCd",
   repos: "metricRepos"
 };
@@ -130,6 +139,7 @@ const navIds = {
   conflicts: "navConflicts",
   running: "navRunning",
   runningCd: "navRunningCd",
+  finishedCd: "navFinishedCd",
   deployments: "navDeployments",
   runners: "navRunners",
   failedCd: "navFailedCd"
@@ -152,14 +162,30 @@ function loadPersisted() {
 function loadInbox() {
   try {
     const raw = JSON.parse(localStorage.getItem(INBOX_KEY) || "[]");
-    return Array.isArray(raw) ? raw.slice(0, INBOX_MAX) : [];
+    if (!Array.isArray(raw)) return [];
+    const pruned = pruneInbox(raw);
+    if (pruned.length !== raw.length) {
+      localStorage.setItem(INBOX_KEY, JSON.stringify(pruned));
+    }
+    return pruned;
   } catch {
     return [];
   }
 }
 
+function pruneInbox(items) {
+  const cutoff = Date.now() - INBOX_TTL_MS;
+  return items
+    .filter((item) => {
+      const time = new Date(item?.at || 0).getTime();
+      return Number.isFinite(time) && time >= cutoff;
+    })
+    .slice(0, INBOX_MAX);
+}
+
 function saveInbox() {
   try {
+    state.inbox = pruneInbox(state.inbox);
     localStorage.setItem(INBOX_KEY, JSON.stringify(state.inbox.slice(0, INBOX_MAX)));
   } catch {}
 }
@@ -554,6 +580,7 @@ function renderMetrics(data) {
     conflicts: data.summary.conflictPrs,
     running: data.summary.runningPrs,
     runningCd: data.summary.runningCd,
+    finishedCd: data.summary.finishedCd,
     deployments: data.summary.runningDeployments,
     runners: data.summary.busyRunners,
     failedCd: data.summary.failedCd
@@ -618,7 +645,7 @@ function render() {
 
 function renderRow(row, viewKey, view) {
   if (["pass", "fail", "running", "conflicts"].includes(viewKey)) return renderPrRow(row, view);
-  if (["runningCd", "failedCd"].includes(viewKey)) return renderCdRow(row, view, viewKey);
+  if (["runningCd", "finishedCd", "failedCd"].includes(viewKey)) return renderCdRow(row, view, viewKey);
   if (viewKey === "deployments") return renderDeploymentRow(row, view);
   return renderRunnerRow(row, view);
 }
@@ -702,7 +729,7 @@ function renderPrRow(row, view) {
 }
 
 function renderCdRow(row, view, viewKey) {
-  const status = viewKey === "failedCd" ? row.conclusion : row.status;
+  const status = viewKey === "runningCd" ? row.status : row.conclusion;
   return `
     <article class="row" data-href="${escapeHtml(row.url || "")}" style="--accent: var(--${view.color}); --soft: var(--${view.color}-soft);">
       <div class="row-main">

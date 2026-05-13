@@ -134,7 +134,7 @@
         </span>
         <span class="meta-spacer"></span>
         <span class="meta-hint" aria-hidden="true">
-          <kbd>/</kbd> filter <kbd>1</kbd>–<kbd>8</kbd> view <kbd>N</kbd> inbox <kbd>R</kbd> refresh
+          <kbd>/</kbd> filter <kbd>1</kbd>–<kbd>9</kbd> view <kbd>N</kbd> inbox <kbd>R</kbd> refresh
         </span>
       </div>
 
@@ -159,6 +159,10 @@
           <button class="metric metric-blue" type="button" data-view="runningCd" aria-label="Show running CD">
             <span class="metric-label">Running CD</span>
             <strong id="metricCd">0</strong>
+          </button>
+          <button class="metric metric-green" type="button" data-view="finishedCd" aria-label="Show finished CD">
+            <span class="metric-label">Finished CD</span>
+            <strong id="metricFinishedCd">0</strong>
           </button>
           <button class="metric metric-ink" type="button" data-view="failedCd" aria-label="Show failed CD">
             <span class="metric-label">Failed CD</span>
@@ -203,6 +207,11 @@
               <span class="dot blue"></span>
               Running CD
               <strong id="navRunningCd">0</strong>
+            </button>
+            <button class="rail-item" type="button" data-view="finishedCd">
+              <span class="dot green"></span>
+              Finished CD
+              <strong id="navFinishedCd">0</strong>
             </button>
             <button class="rail-item" type="button" data-view="deployments">
               <span class="dot violet"></span>

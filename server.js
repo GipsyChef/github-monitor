@@ -124,6 +124,7 @@ const PR_BY_NUMBER_GRAPHQL = `
 
 const CD_WORKFLOW_PATTERN = /(^|[^A-Za-z0-9])(cd|deploy|deployment|release|publish)([^A-Za-z0-9]|$)/i;
 const FAILED_CD_MAX_AGE_MS = 3 * 24 * 60 * 60 * 1000;
+const FINISHED_CD_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const RUNNING_RUN_STATUSES = new Set(["queued", "in_progress", "waiting", "requested", "pending"]);
 const FAILED_RUN_CONCLUSIONS = new Set(["failure", "cancelled", "timed_out", "action_required", "startup_failure"]);
 const FAILED_CHECK_CONCLUSIONS = new Set(["FAILURE", "ERROR", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE"]);
@@ -402,6 +403,11 @@ function isWithinFailedCdWindow(value) {
   return Number.isFinite(time) && Date.now() - time <= FAILED_CD_MAX_AGE_MS;
 }
 
+function isWithinFinishedCdWindow(value) {
+  const time = new Date(value).getTime();
+  return Number.isFinite(time) && Date.now() - time <= FINISHED_CD_MAX_AGE_MS;
+}
+
 function checkFinished(check) {
   if (check.__typename === "CheckRun") return check.status === "COMPLETED";
   return check.state !== "PENDING" && check.state !== "EXPECTED";
@@ -553,16 +559,17 @@ async function fetchWorkflowRuns(repo, workflowId, params) {
 
 async function fetchCdForRepo(repo) {
   const failed = [];
+  const finished = [];
   const running = [];
   let workflows = [];
   try {
     workflows = await fetchCdWorkflows(repo);
   } catch {
-    return { failed, running };
+    return { failed, finished, running };
   }
   for (const workflow of workflows) {
     try {
-      const completedRuns = await fetchWorkflowRuns(repo, workflow.id, { per_page: 1, status: "completed" });
+      const completedRuns = await fetchWorkflowRuns(repo, workflow.id, { per_page: 20, status: "completed" });
       const latest = completedRuns[0];
       const failedAt = latest?.updated_at || latest?.created_at;
       if (latest && FAILED_RUN_CONCLUSIONS.has(latest.conclusion) && isWithinFailedCdWindow(failedAt)) {
@@ -575,6 +582,20 @@ async function fetchCdForRepo(repo) {
           branch: latest.head_branch || "",
           title: latest.display_title || "",
           url: latest.html_url || ""
+        });
+      }
+      for (const run of completedRuns) {
+        const finishedAt = run.updated_at || run.created_at;
+        if (!isWithinFinishedCdWindow(finishedAt)) continue;
+        finished.push({
+          createdAt: finishedAt,
+          repo,
+          workflow: workflow.name,
+          runNumber: `#${run.run_number}`,
+          conclusion: run.conclusion || "",
+          branch: run.head_branch || "",
+          title: run.display_title || "",
+          url: run.html_url || ""
         });
       }
 
@@ -595,7 +616,7 @@ async function fetchCdForRepo(repo) {
       continue;
     }
   }
-  return { failed, running };
+  return { failed, finished, running };
 }
 
 async function fetchRunningDeploymentsForRepo(repo) {
@@ -689,6 +710,7 @@ async function buildDashboardData(requestUrl) {
   const pullRequests = await fetchPullRequests({ mode, me, jobs });
   let repos = [];
   let failedCd = [];
+  let finishedCd = [];
   let runningCd = [];
   let runningDeployments = [];
   let busyRunners = [];
@@ -700,6 +722,7 @@ async function buildDashboardData(requestUrl) {
   if (includeCd && repos.length) {
     const cdGroups = await mapLimit(repos, jobs, fetchCdForRepo);
     failedCd = uniqueBy(cdGroups.flatMap((group) => group.failed), (run) => run.url || JSON.stringify(run));
+    finishedCd = uniqueBy(cdGroups.flatMap((group) => group.finished), (run) => run.url || JSON.stringify(run));
     runningCd = uniqueBy(cdGroups.flatMap((group) => group.running), (run) => run.url || JSON.stringify(run));
     const deploymentGroups = await mapLimit(repos, jobs, fetchRunningDeploymentsForRepo);
     runningDeployments = uniqueBy(deploymentGroups.flat(), (deployment) => deployment.url || JSON.stringify(deployment));
@@ -722,6 +745,7 @@ async function buildDashboardData(requestUrl) {
     runningPrs: prGroups.running.length,
     conflictPrs: prGroups.conflicts.length,
     runningCd: runningCd.length,
+    finishedCd: finishedCd.length,
     runningDeployments: runningDeployments.length,
     busyRunners: busyRunners.length,
     failedCd: failedCd.length
@@ -738,6 +762,7 @@ async function buildDashboardData(requestUrl) {
     pullRequests: prGroups,
     cd: {
       running: runningCd.sort(sortByCreatedDesc),
+      finished: finishedCd.sort(sortByCreatedDesc),
       failed: failedCd.sort(sortByCreatedDesc)
     },
     deployments: {

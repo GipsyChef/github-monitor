@@ -53,7 +53,7 @@ PORT=4180 npm start
 - `All owners`: your repos plus all orgs returned by GitHub
 - `Owned`: repositories owned by your GitHub user
 - `Mine`: PRs authored by you
-- `CD audit`: scan CD/deploy/release/publish workflows, failed latest CD runs, and running deployments
+- `CD audit`: scan CD/deploy/release/publish workflows, CD runs finished in the last 24 hours, failed latest CD runs, and running deployments
 - `Busy runners`: scan owner/org self-hosted runners
 - `Repo runners`: also scan repository-level runners
 - `Jobs`: parallel GitHub lookups, capped at 16
@@ -68,6 +68,8 @@ The server records GitHub rate-limit headers from each REST and GraphQL response
 - A recommended next refresh time
 
 The browser refreshes faster when PR checks, CD actions, deployments, or runners are active. It slows down when the dashboard is quiet, when expensive audit options are enabled, or when GitHub quota gets tight.
+
+The notification inbox is kept in localStorage for quick follow-up and prunes entries older than 24 hours.
 
 ## API
 
