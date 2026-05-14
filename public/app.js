@@ -272,6 +272,10 @@ function mergeKey(repo, number) {
   return `${repo || ""}#${number || ""}`;
 }
 
+function failureDetail(row, fallback = "failed") {
+  return row?.failureReason || (row?.failedChecks || []).join(", ") || fallback;
+}
+
 function buildActivitySnapshot(data) {
   const allPrs = [
     ...(data?.pullRequests?.pass || []),
@@ -403,9 +407,10 @@ function notifyCompletedActions(previousSnapshot, data) {
     const completed = completedPrByKey.get(key);
     if (!completed) continue;
     const stateLabel = completed.state === "pass" ? "passed" : "failed";
+    const reason = completed.state === "fail" ? `. Reason: ${failureDetail(completed, "CI failed")}` : "";
     sendPopup(
       `CI ${stateLabel}`,
-      `${completed.repo} ${completed.numberLabel}: ${completed.title}`,
+      `${completed.repo} ${completed.numberLabel}: ${completed.title}${reason}`,
       `ci:${key}:${stateLabel}`,
       {
         url: completed.url,
@@ -439,9 +444,10 @@ function notifyCompletedActions(previousSnapshot, data) {
     if (nextSnapshot.cd.has(key)) continue;
     const failed = failedCdByKey.get(key);
     const statusLabel = failed ? `failed (${failed.conclusion})` : "finished";
+    const reason = failed ? `. Reason: ${failureDetail(failed, "CD failed")}` : "";
     sendPopup(
       `CD ${statusLabel}`,
-      `${previous.repo} ${previous.workflow} ${previous.runNumber}: ${previous.title || previous.branch}`,
+      `${previous.repo} ${previous.workflow} ${previous.runNumber}: ${previous.title || previous.branch}${reason}`,
       `cd:${key}:${statusLabel}`,
       {
         url: failed?.url || previous.url,
@@ -693,7 +699,9 @@ function renderPrActions(row) {
 }
 
 function renderPrRow(row, view) {
-  const detail = row.runningChecks?.length
+  const detail = row.state === "fail"
+    ? `Reason: ${failureDetail(row, "CI failed")}`
+    : row.runningChecks?.length
     ? row.runningChecks.join(", ")
     : row.checkCount
     ? `${row.checkCount} checks complete`
@@ -730,6 +738,10 @@ function renderPrRow(row, view) {
 
 function renderCdRow(row, view, viewKey) {
   const status = viewKey === "runningCd" ? row.status : row.conclusion;
+  const timeDetail = [row.branch, formatTime(row.createdAt)].filter(Boolean).join(" · ");
+  const detail = viewKey === "failedCd" || row.failureReason
+    ? [`Reason: ${failureDetail(row, "CD failed")}`, timeDetail].filter(Boolean).join(" · ")
+    : timeDetail;
   return `
     <article class="row" data-href="${escapeHtml(row.url || "")}" style="--accent: var(--${view.color}); --soft: var(--${view.color}-soft);">
       <div class="row-main">
@@ -738,7 +750,7 @@ function renderCdRow(row, view, viewKey) {
       </div>
       <div class="meta">${escapeHtml(row.workflow)} ${escapeHtml(row.runNumber)}</div>
       <div class="tag">${escapeHtml(status)}</div>
-      <div class="meta">${escapeHtml(row.branch)} · ${escapeHtml(formatTime(row.createdAt))}</div>
+      <div class="meta">${escapeHtml(detail)}</div>
       ${row.url ? `<a class="open-link" href="${escapeHtml(row.url)}" target="_blank" rel="noreferrer">Open Run</a>` : ""}
     </article>
   `;
