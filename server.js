@@ -127,8 +127,22 @@ const FAILED_CD_MAX_AGE_MS = 3 * 24 * 60 * 60 * 1000;
 const FINISHED_CD_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const RUNNING_RUN_STATUSES = new Set(["queued", "in_progress", "waiting", "requested", "pending"]);
 const FAILED_RUN_CONCLUSIONS = new Set(["failure", "cancelled", "timed_out", "action_required", "startup_failure"]);
+const FAILED_JOB_CONCLUSIONS = new Set(["failure", "cancelled", "timed_out", "action_required", "startup_failure"]);
 const FAILED_CHECK_CONCLUSIONS = new Set(["FAILURE", "ERROR", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE"]);
 const RUNNING_DEPLOYMENT_STATES = new Set(["queued", "pending", "in_progress"]);
+const FAILURE_REASON_LABELS = {
+  FAILURE: "failed",
+  ERROR: "errored",
+  CANCELLED: "cancelled",
+  TIMED_OUT: "timed out",
+  ACTION_REQUIRED: "requires action",
+  STARTUP_FAILURE: "failed to start",
+  failure: "failed",
+  cancelled: "cancelled",
+  timed_out: "timed out",
+  action_required: "requires action",
+  startup_failure: "failed to start"
+};
 
 class HttpError extends Error {
   constructor(status, message) {
@@ -418,6 +432,61 @@ function checkFailed(check) {
   return FAILED_CHECK_CONCLUSIONS.has(conclusion);
 }
 
+function checkName(check) {
+  if (check.__typename === "CheckRun") {
+    const workflow = check.checkSuite?.workflowRun?.workflow?.name;
+    const prefix = workflow ? `${workflow}/` : "";
+    return `${prefix}${check.name || "unnamed check"}`;
+  }
+  return check.context || "status context";
+}
+
+function failureLabel(value) {
+  return FAILURE_REASON_LABELS[value] || String(value || "failed").toLowerCase().replaceAll("_", " ");
+}
+
+function failedCheckLabel(check) {
+  const conclusion = check.__typename === "CheckRun" ? check.conclusion : check.state;
+  return `${checkName(check)} ${failureLabel(conclusion)}`;
+}
+
+function failureReasonFromChecks(checks) {
+  const failedChecks = [...new Set(checks.filter(checkFailed).map(failedCheckLabel))];
+  if (!failedChecks.length) return { failedChecks, failureReason: "" };
+  const suffix = failedChecks.length > 3 ? `, +${failedChecks.length - 3} more` : "";
+  return {
+    failedChecks,
+    failureReason: `${failedChecks.slice(0, 3).join(", ")}${suffix}`
+  };
+}
+
+function cdFailureReason(conclusion) {
+  return `Workflow ${failureLabel(conclusion)}`;
+}
+
+function failedJobLabel(job) {
+  return `${job.name || "unnamed job"} ${failureLabel(job.conclusion)}`;
+}
+
+async function fetchWorkflowRunFailureReason(repo, run) {
+  const fallback = cdFailureReason(run?.conclusion);
+  if (!run?.id) return fallback;
+  try {
+    const jobs = await githubRestAll(
+      `/repos/${repo}/actions/runs/${run.id}/jobs`,
+      (json) => json?.jobs || [],
+      100,
+      { filter: "latest" }
+    );
+    const failedJobs = [...new Set(jobs.filter((job) => FAILED_JOB_CONCLUSIONS.has(job.conclusion)).map(failedJobLabel))];
+    if (!failedJobs.length) return fallback;
+    const suffix = failedJobs.length > 3 ? `, +${failedJobs.length - 3} more` : "";
+    return `${failedJobs.slice(0, 3).join(", ")}${suffix}`;
+  } catch {
+    return fallback;
+  }
+}
+
 function runningCheckLabel(check) {
   if (check.__typename === "CheckRun") {
     const workflow = check.checkSuite?.workflowRun?.workflow?.name;
@@ -449,11 +518,14 @@ function classifyPullRequest(pr) {
     return { ...base, state: "pass", checkCount: 0, runningChecks: [] };
   }
   if (checks.every(checkFinished)) {
+    const failure = failureReasonFromChecks(checks);
     return {
       ...base,
       state: checks.some(checkFailed) ? "fail" : "pass",
       checkCount: checks.length,
-      runningChecks: []
+      runningChecks: [],
+      failedChecks: failure.failedChecks,
+      failureReason: failure.failureReason
     };
   }
   return {
@@ -561,6 +633,7 @@ async function fetchCdForRepo(repo) {
   const failed = [];
   const finished = [];
   const running = [];
+  const failureReasons = new Map();
   let workflows = [];
   try {
     workflows = await fetchCdWorkflows(repo);
@@ -573,12 +646,15 @@ async function fetchCdForRepo(repo) {
       const latest = completedRuns[0];
       const failedAt = latest?.updated_at || latest?.created_at;
       if (latest && FAILED_RUN_CONCLUSIONS.has(latest.conclusion) && isWithinFailedCdWindow(failedAt)) {
+        const failureReason = await fetchWorkflowRunFailureReason(repo, latest);
+        failureReasons.set(latest.id, failureReason);
         failed.push({
           createdAt: failedAt,
           repo,
           workflow: workflow.name,
           runNumber: `#${latest.run_number}`,
           conclusion: latest.conclusion || "",
+          failureReason,
           branch: latest.head_branch || "",
           title: latest.display_title || "",
           url: latest.html_url || ""
@@ -587,12 +663,17 @@ async function fetchCdForRepo(repo) {
       for (const run of completedRuns) {
         const finishedAt = run.updated_at || run.created_at;
         if (!isWithinFinishedCdWindow(finishedAt)) continue;
+        const failureReason = FAILED_RUN_CONCLUSIONS.has(run.conclusion)
+          ? failureReasons.get(run.id) || await fetchWorkflowRunFailureReason(repo, run)
+          : "";
+        if (failureReason) failureReasons.set(run.id, failureReason);
         finished.push({
           createdAt: finishedAt,
           repo,
           workflow: workflow.name,
           runNumber: `#${run.run_number}`,
           conclusion: run.conclusion || "",
+          failureReason,
           branch: run.head_branch || "",
           title: run.display_title || "",
           url: run.html_url || ""
