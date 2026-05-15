@@ -8,7 +8,7 @@ The `main` branch is the supported development line. Tagged releases will receiv
 
 Please do not open a public issue for a suspected vulnerability.
 
-Use GitHub private vulnerability reporting if it is enabled for this repository. If that is unavailable, contact the maintainers privately through the contact methods listed on the repository owner's GitHub profile.
+Use [GitHub private vulnerability reporting](https://github.com/GipsyChef/github-monitor/security/advisories/new) if it is enabled for this repository. If that is unavailable, contact the maintainers privately at [cigan1@gmail.com](mailto:cigan1@gmail.com).
 
 Include:
 
