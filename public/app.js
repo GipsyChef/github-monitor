@@ -2,6 +2,7 @@ const STORAGE_KEY = "pr-deck:v1";
 const INBOX_KEY = "pr-deck:inbox:v1";
 const INBOX_MAX = 60;
 const INBOX_TTL_MS = 24 * 60 * 60 * 1000;
+const AUTO_MERGE_DELAY_MS = 30 * 1000;
 
 const persisted = loadPersisted();
 
@@ -18,8 +19,11 @@ const state = {
   refreshReason: "",
   inboxOpen: false,
   inbox: loadInbox(),
+  autoMerge: persisted.autoMerge === true,
   merging: new Set(),
-  merged: new Set()
+  merged: new Set(),
+  autoMerges: new Map(),
+  autoMergeTicker: null
 };
 
 const views = {
@@ -97,6 +101,7 @@ const els = {
   includeRunners: document.querySelector("#includeRunners"),
   includeRepoRunners: document.querySelector("#includeRepoRunners"),
   autoRefresh: document.querySelector("#autoRefresh"),
+  autoMerge: document.querySelector("#autoMerge"),
   notifications: document.querySelector("#notifications"),
   notifyTest: document.querySelector("#notifyTest"),
   jobs: document.querySelector("#jobs"),
@@ -198,6 +203,7 @@ function persist() {
         mode: state.mode,
         view: state.view,
         filter: state.filter,
+        autoMerge: state.autoMerge,
         notifications: state.notifications
       })
     );
@@ -270,6 +276,104 @@ function prKey(row) {
 
 function mergeKey(repo, number) {
   return `${repo || ""}#${number || ""}`;
+}
+
+function autoMergeRemainingSeconds(key) {
+  const entry = state.autoMerges.get(key);
+  if (!entry) return null;
+  return Math.max(0, Math.ceil((entry.deadline - Date.now()) / 1000));
+}
+
+function readyToMerge(row) {
+  return row?.state === "pass" && !mergeBlockReason(row);
+}
+
+function clearAutoMerge(key) {
+  const entry = state.autoMerges.get(key);
+  if (!entry) return;
+  clearTimeout(entry.timeoutId);
+  state.autoMerges.delete(key);
+  stopAutoMergeTickerIfIdle();
+}
+
+function ensureAutoMergeTicker() {
+  if (state.autoMergeTicker) return;
+  state.autoMergeTicker = setInterval(updateAutoMergeButtons, 1000);
+}
+
+function stopAutoMergeTickerIfIdle() {
+  if (state.autoMerges.size || !state.autoMergeTicker) return;
+  clearInterval(state.autoMergeTicker);
+  state.autoMergeTicker = null;
+}
+
+function autoMergeButtonLabel(key) {
+  const remaining = autoMergeRemainingSeconds(key);
+  if (remaining == null) return "Merge";
+  return remaining > 0 ? `Auto merge in ${remaining}s` : "Merging";
+}
+
+function updateAutoMergeButtons() {
+  document.querySelectorAll(".merge-button[data-auto-merge='true']").forEach((button) => {
+    const key = mergeKey(button.dataset.repo, button.dataset.number);
+    const label = autoMergeButtonLabel(key);
+    button.textContent = label;
+    button.setAttribute(
+      "aria-label",
+      `${label} ${button.dataset.repo || ""} #${button.dataset.number || ""}`.trim()
+    );
+    button.title = label === "Merging" ? "Merging pull request..." : "Automatically merge when the timer reaches zero";
+  });
+  stopAutoMergeTickerIfIdle();
+}
+
+function scheduleAutoMerge(row) {
+  const key = mergeKey(row.repo, row.number);
+  if (!readyToMerge(row) || state.merging.has(key) || state.merged.has(key)) {
+    clearAutoMerge(key);
+    return;
+  }
+  if (state.autoMerges.has(key)) return;
+
+  const timeoutId = setTimeout(() => {
+    if (!state.autoMerges.has(key)) return;
+    state.autoMerges.delete(key);
+    stopAutoMergeTickerIfIdle();
+    mergePullRequest({
+      dataset: {
+        repo: row.repo,
+        number: String(row.number),
+        title: row.title || row.numberLabel || `#${row.number}`
+      }
+    });
+  }, AUTO_MERGE_DELAY_MS);
+
+  state.autoMerges.set(key, {
+    deadline: Date.now() + AUTO_MERGE_DELAY_MS,
+    timeoutId
+  });
+  ensureAutoMergeTicker();
+}
+
+function syncAutoMerges(rows) {
+  if (!state.autoMerge) {
+    for (const key of [...state.autoMerges.keys()]) clearAutoMerge(key);
+    updateAutoMergeButtons();
+    return;
+  }
+
+  const eligibleKeys = new Set();
+  for (const row of rows || []) {
+    const key = mergeKey(row.repo, row.number);
+    if (readyToMerge(row)) {
+      eligibleKeys.add(key);
+      scheduleAutoMerge(row);
+    }
+  }
+  for (const key of [...state.autoMerges.keys()]) {
+    if (!eligibleKeys.has(key) || state.merging.has(key) || state.merged.has(key)) clearAutoMerge(key);
+  }
+  updateAutoMergeButtons();
 }
 
 function failureDetail(row, fallback = "failed") {
@@ -642,6 +746,7 @@ function render() {
   const query = state.filter.trim().toLowerCase();
   const all = view.rows(data);
   const rows = query ? all.filter((row) => rowText(row).includes(query)) : all;
+  syncAutoMerges(rows);
   syncFilterUI(rows.length, all.length);
 
   els.content.innerHTML = rows.length
@@ -669,12 +774,13 @@ function renderPrActions(row) {
   const reason = mergeBlockReason(row);
   const isMerging = state.merging.has(key);
   const isMerged = state.merged.has(key);
-  const buttonLabel = isMerged ? "Merged" : isMerging ? "Merging" : "Merge";
+  const isAutoMerge = !reason && !isMerging && !isMerged && state.autoMerges.has(key);
+  const buttonLabel = isMerged ? "Merged" : isMerging ? "Merging" : isAutoMerge ? autoMergeButtonLabel(key) : "Merge";
   const buttonTitle = isMerged
     ? "Pull request merged"
     : isMerging
     ? "Merging pull request..."
-    : reason || "Merge this passing pull request";
+    : reason || (isAutoMerge ? "Automatically merge when the timer reaches zero" : "Merge this passing pull request");
   const mergeButton = row.state === "pass"
     ? `<button
          class="merge-button"
@@ -683,6 +789,7 @@ function renderPrActions(row) {
          data-number="${escapeHtml(row.number)}"
          data-title="${escapeHtml(row.title)}"
          data-state="${isMerged ? "merged" : isMerging ? "merging" : "ready"}"
+         data-auto-merge="${isAutoMerge ? "true" : "false"}"
          aria-label="${escapeHtml(buttonLabel)} ${escapeHtml(row.repo)} ${escapeHtml(row.numberLabel)}"
          ${reason || isMerging || isMerged ? "disabled" : ""}
          title="${escapeHtml(buttonTitle)}"
@@ -941,7 +1048,9 @@ async function mergePullRequest(button) {
   const key = mergeKey(repo, number);
   const title = button.dataset.title || `#${number}`;
   if (!repo || !Number.isInteger(number)) return;
+  if (state.merging.has(key) || state.merged.has(key)) return;
 
+  clearAutoMerge(key);
   state.merging.add(key);
   state.merged.delete(key);
   setError("");
@@ -994,6 +1103,7 @@ document.querySelectorAll("button.metric").forEach((button) => {
   button.addEventListener("click", () => setView(button.dataset.view));
 });
 
+els.autoMerge.checked = state.autoMerge;
 els.refresh.addEventListener("click", () => refresh());
 els.includeCd.addEventListener("change", refresh);
 els.includeRunners.addEventListener("change", refresh);
@@ -1009,6 +1119,14 @@ els.autoRefresh.addEventListener("change", () => {
     state.nextRefreshAt = null;
     renderRefreshStatus();
   }
+});
+els.autoMerge.addEventListener("change", () => {
+  state.autoMerge = els.autoMerge.checked;
+  persist();
+  if (!state.autoMerge) {
+    for (const key of [...state.autoMerges.keys()]) clearAutoMerge(key);
+  }
+  render();
 });
 els.notifications.addEventListener("change", async () => {
   state.notifications = els.notifications.checked;

@@ -82,8 +82,9 @@ There are currently no runtime npm dependencies beyond Node.js itself; `npm ci` 
 - GitHub API request count, remaining quota, and reset time
 - Adaptive next-refresh timing based on activity and API quota
 - Browser notifications and an in-app inbox for CI/CD completions and new conflicts
+- Optional auto-merge countdown for passing PRs
 
-The merge action is intentionally guarded: before merging, the server re-checks the PR, rejects drafts, conflicts, and PRs without completed passing CI, then deletes the PR head branch after a successful merge.
+The merge action is intentionally guarded: before merging, the server re-checks the PR, rejects drafts, conflicts, and PRs without completed passing CI, then deletes the PR head branch after a successful merge. Auto merge is off by default; when enabled, visible eligible passing PRs show a 30-second countdown on the merge button before running the same guarded merge action.
 
 ## Stack
 
@@ -139,6 +140,7 @@ npm run dev
 - `Repo runners`: also scan repository-level runners
 - `Jobs`: parallel GitHub lookups, capped at 16
 - `Auto refresh`: schedules the next scan adaptively and shows a live countdown
+- `Auto merge`: when enabled, visible passing PR merge buttons count down for 30 seconds and then merge automatically unless clicked first
 
 ## Adaptive Refresh
 
