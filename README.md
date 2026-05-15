@@ -138,7 +138,7 @@ npm run dev
 - `CD audit`: scan CD/deploy/release/publish workflows, CD runs finished in the last 24 hours, failed latest CD runs, and running deployments
 - `Busy runners`: scan owner/org self-hosted runners
 - `Auto refresh`: schedules the next scan adaptively and shows a live countdown
-- `Auto merge`: when enabled, visible passing PRs with completed checks count down for 30 seconds and then merge automatically unless clicked first
+- `Auto merge`: when enabled, visible passing PRs with completed checks count down for 15 seconds and then merge automatically unless clicked first
 
 ## Adaptive Refresh
 

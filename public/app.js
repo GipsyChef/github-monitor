@@ -2,7 +2,7 @@ const STORAGE_KEY = "pr-deck:v1";
 const INBOX_KEY = "pr-deck:inbox:v1";
 const INBOX_MAX = 60;
 const INBOX_TTL_MS = 24 * 60 * 60 * 1000;
-const AUTO_MERGE_DELAY_MS = 30 * 1000;
+const AUTO_MERGE_DELAY_MS = 15 * 1000;
 
 const persisted = loadPersisted();
 
