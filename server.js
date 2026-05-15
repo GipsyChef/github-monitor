@@ -13,6 +13,22 @@ const githubApiBase = "https://api.github.com";
 const githubGraphqlUrl = "https://api.github.com/graphql";
 let githubTokenPromise;
 const scanMetrics = new AsyncLocalStorage();
+const SECURITY_HEADERS = {
+  "content-security-policy": [
+    "default-src 'self'",
+    "script-src 'self'",
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' data:",
+    "connect-src 'self'",
+    "object-src 'none'",
+    "base-uri 'none'",
+    "frame-ancestors 'none'",
+    "form-action 'none'"
+  ].join("; "),
+  "x-content-type-options": "nosniff",
+  "referrer-policy": "no-referrer",
+  "permissions-policy": "camera=(), microphone=(), geolocation=(), payment=()"
+};
 
 const PR_SEARCH_GRAPHQL = `
   query($q: String!, $endCursor: String) {
@@ -34,6 +50,7 @@ const PR_SEARCH_GRAPHQL = `
           }
           repository {
             nameWithOwner
+            isArchived
           }
           commits(last: 1) {
             nodes {
@@ -88,6 +105,7 @@ const PR_BY_NUMBER_GRAPHQL = `
         }
         repository {
           nameWithOwner
+          isArchived
         }
         commits(last: 1) {
           nodes {
@@ -501,7 +519,6 @@ function classifyPullRequest(pr) {
   const checks = pr.commits?.nodes?.[0]?.commit?.statusCheckRollup?.contexts?.nodes?.filter(Boolean) || [];
   const mergeable = pr.mergeable || "UNKNOWN";
   const hasConflict = mergeable === "CONFLICTING";
-  if (!checks.length && !hasConflict) return null;
   const base = {
     repo: pr.repository.nameWithOwner,
     number: pr.number,
@@ -509,6 +526,7 @@ function classifyPullRequest(pr) {
     title: pr.title,
     author: pr.author?.login || "unknown",
     url: pr.url,
+    isArchived: Boolean(pr.repository.isArchived),
     isDraft: Boolean(pr.isDraft),
     mergeable,
     hasConflict,
@@ -548,6 +566,7 @@ async function fetchPrQuery(queryText) {
       ...search.nodes
         .filter((node) => node?.__typename === "PullRequest")
         .map(classifyPullRequest)
+        .filter((pr) => !pr.isArchived)
         .filter(Boolean)
     );
     if (!search.pageInfo?.hasNextPage) break;
@@ -576,13 +595,17 @@ async function allOwners(me) {
   return [me, ...orgs.map((org) => org.login).filter(Boolean)];
 }
 
+function openPullRequestSearchQuery(qualifier, value) {
+  return `is:pr state:open archived:false ${qualifier}:${value}`;
+}
+
 async function fetchPullRequests({ mode, me, jobs }) {
-  if (mode === "mine") return fetchPrQuery(`is:pr state:open author:${me}`);
-  if (mode === "owned") return fetchPrQuery(`is:pr state:open owner:${me}`);
+  if (mode === "mine") return fetchPrQuery(openPullRequestSearchQuery("author", me));
+  if (mode === "owned") return fetchPrQuery(openPullRequestSearchQuery("owner", me));
   const owners = await allOwners(me);
   const groups = await mapLimit(owners, jobs, async (owner) => {
     try {
-      return await fetchPrQuery(`is:pr state:open owner:${owner}`);
+      return await fetchPrQuery(openPullRequestSearchQuery("owner", owner));
     } catch {
       return [];
     }
@@ -818,6 +841,7 @@ async function buildDashboardData(requestUrl) {
   const summary = {
     repos: repos.length || new Set(pullRequests.map((pr) => pr.repo)).size,
     passingPrs: prGroups.pass.length,
+    noCiPrs: prGroups.noCi.length,
     failingPrs: prGroups.fail.length,
     runningPrs: prGroups.running.length,
     conflictPrs: prGroups.conflicts.length,
@@ -853,11 +877,24 @@ async function buildDashboardData(requestUrl) {
 
 function groupPullRequests(pullRequests) {
   return {
-    pass: pullRequests.filter((pr) => pr.state === "pass" && !pr.hasConflict).sort(sortByRepoAndNumber),
+    pass: pullRequests.filter((pr) => pr.state === "pass" && pr.checkCount > 0 && !pr.hasConflict).sort(sortByRepoAndNumber),
+    noCi: pullRequests
+      .filter((pr) => pr.state === "pass" && pr.checkCount === 0 && !pr.isDraft && !pr.hasConflict)
+      .sort(sortByRepoAndNumber),
     fail: pullRequests.filter((pr) => pr.state === "fail" && !pr.hasConflict).sort(sortByRepoAndNumber),
     running: pullRequests.filter((pr) => pr.state === "running" && !pr.hasConflict).sort(sortByRepoAndNumber),
     conflicts: pullRequests.filter((pr) => pr.hasConflict).sort(sortByRepoAndNumber)
   };
+}
+
+function mergeBlockReason(pr) {
+  if (!pr || pr.state !== "pass") return "This pull request is not ready to merge.";
+  if (pr.isDraft) return "Draft pull requests cannot be merged.";
+  if (pr.hasConflict) return "This pull request has merge conflicts.";
+  if (pr.checkCount === 0 && pr.mergeable !== "MERGEABLE") {
+    return "This pull request is not currently mergeable.";
+  }
+  return "";
 }
 
 function sortByRepoAndNumber(a, b) {
@@ -870,6 +907,7 @@ function sortByCreatedDesc(a, b) {
 
 async function sendJson(res, status, body) {
   res.writeHead(status, {
+    ...SECURITY_HEADERS,
     "content-type": "application/json; charset=utf-8",
     "cache-control": "no-store"
   });
@@ -960,14 +998,9 @@ async function mergePullRequest(req, res) {
   const { repo } = parseRepo(body.repo);
   const number = parsePullNumber(body.number);
   const pr = await fetchPullRequestByNumber(repo, number);
-  if (!pr || pr.state !== "pass" || pr.checkCount < 1) {
-    throw new HttpError(409, "This pull request does not have completed passing CI checks.");
-  }
-  if (pr.isDraft) {
-    throw new HttpError(409, "Draft pull requests cannot be merged.");
-  }
-  if (pr.hasConflict) {
-    throw new HttpError(409, "This pull request has merge conflicts.");
+  const reason = mergeBlockReason(pr);
+  if (reason) {
+    throw new HttpError(409, reason);
   }
 
   const result = await githubRequest(`/repos/${repo}/pulls/${number}/merge`, {
@@ -995,6 +1028,36 @@ async function mergePullRequest(req, res) {
   });
 }
 
+async function closePullRequest(req, res) {
+  if (req.method !== "POST") {
+    throw new HttpError(405, "Method not allowed");
+  }
+
+  const body = await readJsonBody(req);
+  const { repo } = parseRepo(body.repo);
+  const number = parsePullNumber(body.number);
+  const pr = await fetchPullRequestByNumber(repo, number);
+
+  const result = await githubRequest(`/repos/${repo}/pulls/${number}`, {
+    method: "PATCH",
+    body: {
+      state: "closed"
+    }
+  });
+
+  await sendJson(res, 200, {
+    closed: result?.state === "closed",
+    message: result?.state === "closed" ? "Pull request closed." : "GitHub did not close the pull request.",
+    pr: {
+      repo: pr.repo,
+      number: pr.number,
+      numberLabel: pr.numberLabel,
+      title: pr.title,
+      url: pr.url
+    }
+  });
+}
+
 async function sendStatic(req, res) {
   const requestUrl = new URL(req.url, `http://${req.headers.host}`);
   const pathname = requestUrl.pathname === "/" ? "/index.html" : requestUrl.pathname;
@@ -1009,6 +1072,7 @@ async function sendStatic(req, res) {
     ".svg": "image/svg+xml"
   };
   res.writeHead(200, {
+    ...SECURITY_HEADERS,
     "content-type": types[extname(filePath)] || "application/octet-stream",
     "cache-control": "no-store"
   });
@@ -1038,6 +1102,10 @@ const server = http.createServer(async (req, res) => {
       await mergePullRequest(req, res);
       return;
     }
+    if (requestUrl.pathname === "/api/pull-request/close") {
+      await closePullRequest(req, res);
+      return;
+    }
     if (requestUrl.pathname === "/api/health") {
       await sendJson(res, 200, { ok: true });
       return;
@@ -1059,4 +1127,4 @@ if (isMain) {
   });
 }
 
-export { groupPullRequests };
+export { SECURITY_HEADERS, classifyPullRequest, groupPullRequests, mergeBlockReason, openPullRequestSearchQuery };

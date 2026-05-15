@@ -22,6 +22,8 @@ const state = {
   autoMerge: persisted.autoMerge === true,
   merging: new Set(),
   merged: new Set(),
+  closing: new Set(),
+  closed: new Set(),
   autoMerges: new Map(),
   autoMergeTicker: null
 };
@@ -54,6 +56,13 @@ const views = {
     empty: "No PRs passing CI yet.",
     color: "green",
     rows: (data) => data.pullRequests.pass
+  },
+  noCi: {
+    kicker: "No CI",
+    title: "Ready PRs without reported checks",
+    empty: "No ready PRs without CI.",
+    color: "gray",
+    rows: (data) => data.pullRequests.noCi || []
   },
   runningCd: {
     kicker: "Running CD Actions",
@@ -92,19 +101,16 @@ const views = {
   }
 };
 
-const viewOrder = ["fail", "conflicts", "running", "pass", "runningCd", "finishedCd", "deployments", "runners", "failedCd"];
+const viewOrder = ["fail", "conflicts", "running", "pass", "noCi", "runningCd", "finishedCd", "deployments", "runners", "failedCd"];
 
 const els = {
   account: document.querySelector("#account"),
   generatedAt: document.querySelector("#generatedAt"),
   includeCd: document.querySelector("#includeCd"),
   includeRunners: document.querySelector("#includeRunners"),
-  includeRepoRunners: document.querySelector("#includeRepoRunners"),
   autoRefresh: document.querySelector("#autoRefresh"),
   autoMerge: document.querySelector("#autoMerge"),
   notifications: document.querySelector("#notifications"),
-  notifyTest: document.querySelector("#notifyTest"),
-  jobs: document.querySelector("#jobs"),
   refresh: document.querySelector("#refresh"),
   nextRefresh: document.querySelector("#nextRefresh"),
   rateLimit: document.querySelector("#rateLimit"),
@@ -129,6 +135,7 @@ const els = {
 
 const metricIds = {
   passingPrs: "metricPassing",
+  noCiPrs: "metricNoCi",
   failingPrs: "metricFailing",
   conflictPrs: "metricConflicts",
   runningPrs: "metricRunning",
@@ -140,6 +147,7 @@ const metricIds = {
 
 const navIds = {
   pass: "navPass",
+  noCi: "navNoCi",
   fail: "navFail",
   conflicts: "navConflicts",
   running: "navRunning",
@@ -288,6 +296,10 @@ function readyToMerge(row) {
   return row?.state === "pass" && !mergeBlockReason(row);
 }
 
+function readyToAutoMerge(row) {
+  return readyToMerge(row) && row.checkCount > 0;
+}
+
 function clearAutoMerge(key) {
   const entry = state.autoMerges.get(key);
   if (!entry) return;
@@ -329,7 +341,7 @@ function updateAutoMergeButtons() {
 
 function scheduleAutoMerge(row) {
   const key = mergeKey(row.repo, row.number);
-  if (!readyToMerge(row) || state.merging.has(key) || state.merged.has(key)) {
+  if (!readyToAutoMerge(row) || state.merging.has(key) || state.merged.has(key)) {
     clearAutoMerge(key);
     return;
   }
@@ -365,7 +377,7 @@ function syncAutoMerges(rows) {
   const eligibleKeys = new Set();
   for (const row of rows || []) {
     const key = mergeKey(row.repo, row.number);
-    if (readyToMerge(row)) {
+    if (readyToAutoMerge(row)) {
       eligibleKeys.add(key);
       scheduleAutoMerge(row);
     }
@@ -383,8 +395,10 @@ function failureDetail(row, fallback = "failed") {
 function buildActivitySnapshot(data) {
   const allPrs = [
     ...(data?.pullRequests?.pass || []),
+    ...(data?.pullRequests?.noCi || []),
     ...(data?.pullRequests?.fail || []),
-    ...(data?.pullRequests?.running || [])
+    ...(data?.pullRequests?.running || []),
+    ...(data?.pullRequests?.conflicts || [])
   ];
   return {
     includeCd: Boolean(data?.options?.includeCd),
@@ -411,7 +425,6 @@ async function requestNotificationPermission() {
 function syncNotificationControl() {
   const permission = notificationPermission();
   els.notifications.disabled = permission === "unsupported";
-  els.notifyTest.disabled = permission === "unsupported" || permission === "denied";
   if (permission === "denied" || permission === "unsupported") {
     els.notifications.checked = false;
     state.notifications = false;
@@ -526,8 +539,10 @@ function notifyCompletedActions(previousSnapshot, data) {
 
   const allPrs = [
     ...(data?.pullRequests?.pass || []),
+    ...(data?.pullRequests?.noCi || []),
     ...(data?.pullRequests?.fail || []),
-    ...(data?.pullRequests?.running || [])
+    ...(data?.pullRequests?.running || []),
+    ...(data?.pullRequests?.conflicts || [])
   ];
   const prByKey = new Map(allPrs.map((row) => [prKey(row), row]));
   for (const key of nextSnapshot.conflicts) {
@@ -637,8 +652,8 @@ function buildParams() {
     mode: state.mode,
     includeCd: els.includeCd.checked ? "1" : "0",
     includeRunners: els.includeRunners.checked ? "1" : "0",
-    includeRepoRunners: els.includeRepoRunners.checked ? "1" : "0",
-    jobs: els.jobs.value || "4"
+    includeRepoRunners: "0",
+    jobs: "4"
   });
 }
 
@@ -686,6 +701,7 @@ function renderMetrics(data) {
   }
   const navCounts = {
     pass: data.summary.passingPrs,
+    noCi: data.summary.noCiPrs,
     fail: data.summary.failingPrs,
     conflicts: data.summary.conflictPrs,
     running: data.summary.runningPrs,
@@ -704,7 +720,7 @@ function syncActiveAffordances() {
   document.querySelectorAll(".segment").forEach((button) => {
     const isActive = button.dataset.mode === state.mode;
     button.classList.toggle("active", isActive);
-    button.setAttribute("aria-current", isActive ? "true" : "false");
+    button.setAttribute("aria-pressed", isActive ? "true" : "false");
   });
   document.querySelectorAll(".rail-item").forEach((button) => {
     const isActive = button.dataset.view === state.view;
@@ -755,7 +771,7 @@ function render() {
 }
 
 function renderRow(row, viewKey, view) {
-  if (["pass", "fail", "running", "conflicts"].includes(viewKey)) return renderPrRow(row, view);
+  if (["pass", "noCi", "fail", "running", "conflicts"].includes(viewKey)) return renderPrRow(row, view);
   if (["runningCd", "finishedCd", "failedCd"].includes(viewKey)) return renderCdRow(row, view, viewKey);
   if (viewKey === "deployments") return renderDeploymentRow(row, view);
   return renderRunnerRow(row, view);
@@ -763,9 +779,9 @@ function renderRow(row, viewKey, view) {
 
 function mergeBlockReason(row) {
   if (row.state !== "pass") return "CI is not passing";
-  if (!row.checkCount) return "No completed CI checks were reported";
   if (row.isDraft) return "Draft pull requests cannot be merged";
   if (row.hasConflict) return "Resolve merge conflicts first";
+  if (row.checkCount === 0 && row.mergeable !== "MERGEABLE") return "Pull request is not currently mergeable";
   return "";
 }
 
@@ -774,14 +790,23 @@ function renderPrActions(row) {
   const reason = mergeBlockReason(row);
   const isMerging = state.merging.has(key);
   const isMerged = state.merged.has(key);
+  const isClosing = state.closing.has(key);
+  const isClosed = state.closed.has(key);
   const isAutoMerge = !reason && !isMerging && !isMerged && state.autoMerges.has(key);
   const buttonLabel = isMerged ? "Merged" : isMerging ? "Merging" : isAutoMerge ? autoMergeButtonLabel(key) : "Merge";
   const buttonTitle = isMerged
     ? "Pull request merged"
     : isMerging
     ? "Merging pull request..."
-    : reason || (isAutoMerge ? "Automatically merge when the timer reaches zero" : "Merge this passing pull request");
-  const mergeButton = row.state === "pass"
+    : reason || (isAutoMerge ? "Automatically merge when the timer reaches zero" : "Merge this pull request");
+  const closeLabel = isClosed ? "Closed" : isClosing ? "Closing" : "Close";
+  const closeTitle = isClosed
+    ? "Pull request closed"
+    : isClosing
+    ? "Closing pull request..."
+    : "Close this pull request";
+  const showMergeButton = row.state === "pass" && !isClosed && !(row.checkCount === 0 && row.mergeable !== "MERGEABLE");
+  const mergeButton = showMergeButton
     ? `<button
          class="merge-button"
          type="button"
@@ -791,15 +816,31 @@ function renderPrActions(row) {
          data-state="${isMerged ? "merged" : isMerging ? "merging" : "ready"}"
          data-auto-merge="${isAutoMerge ? "true" : "false"}"
          aria-label="${escapeHtml(buttonLabel)} ${escapeHtml(row.repo)} ${escapeHtml(row.numberLabel)}"
-         ${reason || isMerging || isMerged ? "disabled" : ""}
+         ${reason || isMerging || isMerged || isClosing ? "disabled" : ""}
          title="${escapeHtml(buttonTitle)}"
        >
          ${buttonLabel}
        </button>`
     : "";
+  const closeButton = !isMerged
+    ? `<button
+         class="close-button"
+         type="button"
+         data-repo="${escapeHtml(row.repo)}"
+         data-number="${escapeHtml(row.number)}"
+         data-title="${escapeHtml(row.title)}"
+         data-state="${isClosed ? "closed" : isClosing ? "closing" : "ready"}"
+         aria-label="${escapeHtml(closeLabel)} ${escapeHtml(row.repo)} ${escapeHtml(row.numberLabel)}"
+         ${isClosing || isClosed || isMerging ? "disabled" : ""}
+         title="${escapeHtml(closeTitle)}"
+       >
+         ${closeLabel}
+       </button>`
+    : "";
   return `
     <div class="row-actions">
       ${mergeButton}
+      ${closeButton}
       <a class="open-link" href="${escapeHtml(row.url)}" target="_blank" rel="noreferrer">Open PR</a>
     </div>
   `;
@@ -1090,6 +1131,49 @@ async function mergePullRequest(button) {
   }
 }
 
+async function closePullRequest(button) {
+  const repo = button.dataset.repo;
+  const number = Number(button.dataset.number);
+  const key = mergeKey(repo, number);
+  const title = button.dataset.title || `#${number}`;
+  if (!repo || !Number.isInteger(number)) return;
+  if (state.closing.has(key) || state.closed.has(key) || state.merging.has(key) || state.merged.has(key)) return;
+
+  clearAutoMerge(key);
+  state.closing.add(key);
+  state.closed.delete(key);
+  setError("");
+  render();
+  try {
+    const response = await fetch("/api/pull-request/close", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ repo, number })
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(data.error || "Unable to close pull request");
+    }
+    if (!data.closed) {
+      throw new Error(data.message || "GitHub did not close the pull request");
+    }
+    state.closing.delete(key);
+    state.closed.add(key);
+    render();
+    showToast(
+      "PR closed",
+      `${data.pr?.repo || repo} ${data.pr?.numberLabel || `#${number}`}: ${data.pr?.title || title}.`
+    );
+    await refresh({ source: "close" });
+  } catch (error) {
+    setError(error.message);
+    showToast("Close failed", error.message);
+  } finally {
+    state.closing.delete(key);
+    render();
+  }
+}
+
 /* —— wiring —— */
 document.querySelectorAll(".segment").forEach((button) => {
   button.addEventListener("click", () => setMode(button.dataset.mode));
@@ -1107,10 +1191,6 @@ els.autoMerge.checked = state.autoMerge;
 els.refresh.addEventListener("click", () => refresh());
 els.includeCd.addEventListener("change", refresh);
 els.includeRunners.addEventListener("change", refresh);
-els.includeRepoRunners.addEventListener("change", () => {
-  if (els.includeRepoRunners.checked) els.includeRunners.checked = true;
-  refresh();
-});
 els.autoRefresh.addEventListener("change", () => {
   if (els.autoRefresh.checked && state.data) {
     scheduleAutoRefresh(state.data);
@@ -1148,29 +1228,6 @@ els.notifications.addEventListener("change", async () => {
   }
   syncNotificationControl();
 });
-els.notifyTest.addEventListener("click", async () => {
-  state.notifications = true;
-  persist();
-  syncNotificationControl();
-  const permission = await requestNotificationPermission();
-  if (permission !== "granted") {
-    showToast("Notifications blocked", "Chrome did not grant browser notification permission.");
-    syncNotificationControl();
-    return;
-  }
-  const displayed = await showBrowserNotification(
-    "PR Command Deck test",
-    "Browser notifications are wired up.",
-    `notifications:test:${Date.now()}`
-  );
-  showToast(
-    displayed ? "Test notification sent" : "Native notification failed",
-    displayed ? "If no popup appeared, check macOS Focus or Chrome notification settings." : "In-app alerts will still appear here."
-  );
-  syncNotificationControl();
-});
-els.jobs.addEventListener("change", refresh);
-
 els.inboxToggle.addEventListener("click", (event) => {
   event.stopPropagation();
   toggleInbox();
@@ -1192,6 +1249,14 @@ els.content.addEventListener("click", (event) => {
   event.preventDefault();
   event.stopPropagation();
   mergePullRequest(button);
+});
+
+els.content.addEventListener("click", (event) => {
+  const button = event.target.closest(".close-button");
+  if (!button) return;
+  event.preventDefault();
+  event.stopPropagation();
+  closePullRequest(button);
 });
 
 document.addEventListener("click", (event) => {
@@ -1268,6 +1333,11 @@ document.addEventListener("keydown", (event) => {
   }
 
   const n = Number(event.key);
+  if (event.key === "0" && viewOrder.length >= 10) {
+    event.preventDefault();
+    setView(viewOrder[9]);
+    return;
+  }
   if (Number.isInteger(n) && n >= 1 && n <= viewOrder.length) {
     event.preventDefault();
     setView(viewOrder[n - 1]);
