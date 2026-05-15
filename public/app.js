@@ -908,6 +908,7 @@ function markAllInboxRead() {
   if (changed) {
     saveInbox();
     renderInbox();
+    closeInbox();
   }
 }
 
@@ -916,6 +917,7 @@ function clearInbox() {
   state.inbox = [];
   saveInbox();
   renderInbox();
+  closeInbox();
 }
 
 function markInboxItemRead(id) {
