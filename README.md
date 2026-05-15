@@ -73,7 +73,7 @@ There are currently no runtime npm dependencies beyond Node.js itself; `npm ci` 
 
 ## What It Shows
 
-- Open PRs grouped by passing, failing, running, and merge conflict states
+- Open PRs from non-archived repositories, grouped by passing, no-CI, failing, running, and merge conflict states
 - Optional CD/deploy/release/publish workflow audit
 - CD runs that finished in the last 24 hours
 - Latest failed CD runs from the last 3 days
@@ -82,9 +82,9 @@ There are currently no runtime npm dependencies beyond Node.js itself; `npm ci` 
 - GitHub API request count, remaining quota, and reset time
 - Adaptive next-refresh timing based on activity and API quota
 - Browser notifications and an in-app inbox for CI/CD completions and new conflicts
-- Optional auto-merge countdown for passing PRs
+- Optional auto-merge countdown for passing PRs with completed checks
 
-The merge action is intentionally guarded: before merging, the server re-checks the PR, rejects drafts, conflicts, and PRs without completed passing CI, then deletes the PR head branch after a successful merge. Auto merge is off by default; when enabled, visible eligible passing PRs show a 30-second countdown on the merge button before running the same guarded merge action.
+The merge action is intentionally guarded: before merging, the server re-checks the PR and rejects drafts, conflicts, failing checks, running checks, and no-CI PRs that GitHub does not currently report as mergeable. No-CI PRs that are mergeable can be merged manually. After a successful merge, the server deletes the PR head branch. Auto merge is off by default; when enabled, visible eligible passing PRs with completed checks show a 30-second countdown on the merge button before running the same guarded merge action. PRs can also be closed from the dashboard regardless of CI state.
 
 ## Stack
 
@@ -137,10 +137,8 @@ npm run dev
 - `Mine`: PRs authored by you
 - `CD audit`: scan CD/deploy/release/publish workflows, CD runs finished in the last 24 hours, failed latest CD runs, and running deployments
 - `Busy runners`: scan owner/org self-hosted runners
-- `Repo runners`: also scan repository-level runners
-- `Jobs`: parallel GitHub lookups, capped at 16
 - `Auto refresh`: schedules the next scan adaptively and shows a live countdown
-- `Auto merge`: when enabled, visible passing PR merge buttons count down for 30 seconds and then merge automatically unless clicked first
+- `Auto merge`: when enabled, visible passing PRs with completed checks count down for 30 seconds and then merge automatically unless clicked first
 
 ## Adaptive Refresh
 
@@ -159,11 +157,12 @@ The notification inbox is kept in localStorage for quick follow-up and prunes en
 ```text
 GET /api/status?mode=all&includeCd=1&includeRunners=0&includeRepoRunners=0&jobs=4
 POST /api/pull-request/merge
+POST /api/pull-request/close
 GET /api/health
 ```
 
 `mode` can be `all`, `owned`, or `mine`.
-Merge requests must include JSON like `{"repo":"owner/name","number":123}`. The server re-checks the PR before merging, rejects drafts, conflicts, and PRs without completed passing CI, then deletes the PR head branch after a successful merge.
+Merge requests must include JSON like `{"repo":"owner/name","number":123}`. The server re-checks the PR before merging, rejects drafts, conflicts, failing checks, running checks, and no-CI PRs that GitHub does not currently report as mergeable, then deletes the PR head branch after a successful merge. Close requests use the same JSON shape and close the PR without requiring CI.
 
 ## Security
 
@@ -179,7 +178,7 @@ This is a small local utility, so support is best effort. Hosted multi-user depl
 
 ## Notes
 
-PRs with no CI checks are hidden, matching the behavior of the original script.
+Draft PRs with no CI checks are hidden. Non-draft PRs with no reported checks and no merge conflicts appear in the No CI view.
 
 ## Contributing
 

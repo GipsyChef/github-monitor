@@ -33,5 +33,9 @@
   },
   "engines": {
     "node": ">=22"
+  },
+  "devDependencies": {
+    "axe-core": "^4.11.4",
+    "playwright": "^1.60.0"
   }
 }
