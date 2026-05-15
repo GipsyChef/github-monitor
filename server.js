@@ -5,6 +5,7 @@ import { readFile } from "node:fs/promises";
 import { extname, join, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
 
+const isMain = process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const publicDir = join(__dirname, "public");
 const port = Number(process.env.PORT || 4177);
@@ -813,12 +814,7 @@ async function buildDashboardData(requestUrl) {
     busyRunners = await fetchBusyRunners({ includeRepoRunners, repos, pullRequests, mode, me, jobs });
   }
 
-  const prGroups = {
-    pass: pullRequests.filter((pr) => pr.state === "pass").sort(sortByRepoAndNumber),
-    fail: pullRequests.filter((pr) => pr.state === "fail").sort(sortByRepoAndNumber),
-    running: pullRequests.filter((pr) => pr.state === "running").sort(sortByRepoAndNumber),
-    conflicts: pullRequests.filter((pr) => pr.hasConflict).sort(sortByRepoAndNumber)
-  };
+  const prGroups = groupPullRequests(pullRequests);
   const summary = {
     repos: repos.length || new Set(pullRequests.map((pr) => pr.repo)).size,
     passingPrs: prGroups.pass.length,
@@ -852,6 +848,15 @@ async function buildDashboardData(requestUrl) {
     runners: {
       busy: busyRunners.sort((a, b) => `${a.scope}/${a.name}`.localeCompare(`${b.scope}/${b.name}`))
     }
+  };
+}
+
+function groupPullRequests(pullRequests) {
+  return {
+    pass: pullRequests.filter((pr) => pr.state === "pass" && !pr.hasConflict).sort(sortByRepoAndNumber),
+    fail: pullRequests.filter((pr) => pr.state === "fail" && !pr.hasConflict).sort(sortByRepoAndNumber),
+    running: pullRequests.filter((pr) => pr.state === "running" && !pr.hasConflict).sort(sortByRepoAndNumber),
+    conflicts: pullRequests.filter((pr) => pr.hasConflict).sort(sortByRepoAndNumber)
   };
 }
 
@@ -1048,6 +1053,10 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.listen(port, "127.0.0.1", () => {
-  console.log(`GitHub Monitor dashboard: http://127.0.0.1:${port}`);
-});
+if (isMain) {
+  server.listen(port, "127.0.0.1", () => {
+    console.log(`GitHub Monitor dashboard: http://127.0.0.1:${port}`);
+  });
+}
+
+export { groupPullRequests };

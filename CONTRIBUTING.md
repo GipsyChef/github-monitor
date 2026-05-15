@@ -28,7 +28,7 @@ Open `http://127.0.0.1:4177`.
 - Keep changes focused and easy to review.
 - Update `README.md` when user-facing behavior, configuration, or security boundaries change.
 - Add tests or focused verification notes for behavior changes.
-- Do not commit real tokens, `.env` files, local logs, screenshots with private data, or repository/customer names that should not be public.
+- Do not commit real tokens, `.env` files, local logs, screenshots with private data, or repository/organization names that should not be public.
 - For changes to merge behavior, GitHub API scopes, or token handling, describe the security impact in the PR.
 
 Every pull request is expected to pass the required GitHub Actions checks:

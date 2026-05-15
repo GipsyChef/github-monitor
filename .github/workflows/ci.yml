@@ -77,6 +77,8 @@ jobs:
             CONTRIBUTING.md
             CODE_OF_CONDUCT.md
             CHANGELOG.md
+            MAINTAINERS.md
+            SUPPORT.md
             .github/CODEOWNERS
             package-lock.json
           )
@@ -106,6 +108,11 @@ jobs:
           const readme = readFileSync("README.md", "utf8");
           for (const heading of ["## Quick Start", "## What It Shows", "## Security", "## Contributing", "## License"]) {
             if (!readme.includes(heading)) failures.push(`README.md is missing ${heading}`);
+          }
+
+          const maintainers = readFileSync("MAINTAINERS.md", "utf8");
+          if (!maintainers.includes("cigan1@gmail.com")) {
+            failures.push("MAINTAINERS.md must list cigan1@gmail.com");
           }
 
           if (failures.length) {
@@ -143,6 +150,31 @@ jobs:
             }
             for (const [label, pattern] of patterns) {
               if (pattern.test(text)) failures.push(`${file}: potential ${label}`);
+            }
+          }
+
+          if (failures.length) {
+            for (const failure of failures) console.error(`::error::${failure}`);
+            process.exit(1);
+          }
+          NODE
+
+          node --input-type=module <<'NODE'
+          import { execFileSync } from "node:child_process";
+          import { readFileSync } from "node:fs";
+
+          const workflows = execFileSync("git", ["ls-files", ".github/workflows/*.yml", ".github/workflows/*.yaml"], { encoding: "utf8" })
+            .split("\n")
+            .filter(Boolean);
+          const writePermission = /^\s*[a-z-]+:\s*write\s*$/m;
+          const hasPullRequestTrigger = (text) =>
+            /^\s*pull_request\s*:/m.test(text) || /^\s*-\s*pull_request\s*$/m.test(text);
+          const failures = [];
+
+          for (const file of workflows) {
+            const text = readFileSync(file, "utf8");
+            if (hasPullRequestTrigger(text) && writePermission.test(text)) {
+              failures.push(`${file}: pull_request workflows must not request write permissions`);
             }
           }
 

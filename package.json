@@ -28,8 +28,8 @@
   "scripts": {
     "start": "node server.js",
     "dev": "./start.sh",
-    "check": "node --check server.js",
-    "test": "npm run check"
+    "check": "node --check server.js && node --check public/app.js",
+    "test": "node --test && npm run check"
   },
   "engines": {
     "node": ">=22"

@@ -775,6 +775,11 @@ button.metric.active::before { width: 4px; }
   border-color: var(--green);
   background: var(--green);
   color: var(--paper-strong);
+  min-width: 148px;
+  white-space: nowrap;
+}
+.merge-button[data-auto-merge="true"] {
+  box-shadow: inset 0 -2px 0 color-mix(in srgb, var(--paper-strong) 48%, transparent);
 }
 .merge-button:hover:not(:disabled) {
   background: color-mix(in srgb, var(--green) 84%, black);
