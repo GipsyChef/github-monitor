@@ -26,6 +26,7 @@ Open `http://127.0.0.1:4177`.
 ## Pull Requests
 
 - Keep changes focused and easy to review.
+- Update `CHANGELOG.md` for every user-facing behavior change, workflow change, security hardening change, or notable documentation/process change.
 - Update `README.md` when user-facing behavior, configuration, or security boundaries change.
 - Add tests or focused verification notes for behavior changes.
 - Do not commit real tokens, `.env` files, local logs, screenshots with private data, or repository/organization names that should not be public.
