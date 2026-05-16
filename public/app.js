@@ -2,7 +2,6 @@ const STORAGE_KEY = "pr-deck:v1";
 const INBOX_KEY = "pr-deck:inbox:v1";
 const INBOX_MAX = 60;
 const INBOX_TTL_MS = 24 * 60 * 60 * 1000;
-const AUTO_MERGE_DELAY_MS = 15 * 1000;
 
 const persisted = loadPersisted();
 
@@ -292,18 +291,7 @@ function autoMergeRemainingSeconds(key) {
   return Math.max(0, Math.ceil((entry.deadline - Date.now()) / 1000));
 }
 
-function readyToMerge(row) {
-  return row?.state === "pass" && !mergeBlockReason(row);
-}
-
-function readyToAutoMerge(row) {
-  return readyToMerge(row) && row.checkCount > 0;
-}
-
 function clearAutoMerge(key) {
-  const entry = state.autoMerges.get(key);
-  if (!entry) return;
-  clearTimeout(entry.timeoutId);
   state.autoMerges.delete(key);
   stopAutoMergeTickerIfIdle();
 }
@@ -339,53 +327,48 @@ function updateAutoMergeButtons() {
   stopAutoMergeTickerIfIdle();
 }
 
-function scheduleAutoMerge(row) {
-  const key = mergeKey(row.repo, row.number);
-  if (!readyToAutoMerge(row) || state.merging.has(key) || state.merged.has(key)) {
-    clearAutoMerge(key);
-    return;
-  }
-  if (state.autoMerges.has(key)) return;
-
-  const timeoutId = setTimeout(() => {
-    if (!state.autoMerges.has(key)) return;
-    state.autoMerges.delete(key);
-    stopAutoMergeTickerIfIdle();
-    mergePullRequest({
-      dataset: {
-        repo: row.repo,
-        number: String(row.number),
-        title: row.title || row.numberLabel || `#${row.number}`
-      }
-    });
-  }, AUTO_MERGE_DELAY_MS);
-
-  state.autoMerges.set(key, {
-    deadline: Date.now() + AUTO_MERGE_DELAY_MS,
-    timeoutId
-  });
-  ensureAutoMergeTicker();
-}
-
-function syncAutoMerges(rows) {
+function syncAutoMerges(data) {
+  state.autoMerges.clear();
   if (!state.autoMerge) {
-    for (const key of [...state.autoMerges.keys()]) clearAutoMerge(key);
     updateAutoMergeButtons();
     return;
   }
 
-  const eligibleKeys = new Set();
-  for (const row of rows || []) {
-    const key = mergeKey(row.repo, row.number);
-    if (readyToAutoMerge(row)) {
-      eligibleKeys.add(key);
-      scheduleAutoMerge(row);
-    }
+  for (const candidate of data?.autoMerge?.candidates || []) {
+    const deadline = new Date(candidate.deadline).getTime();
+    if (!Number.isFinite(deadline)) continue;
+    state.autoMerges.set(mergeKey(candidate.repo, candidate.number), {
+      deadline,
+      error: candidate.error || ""
+    });
   }
-  for (const key of [...state.autoMerges.keys()]) {
-    if (!eligibleKeys.has(key) || state.merging.has(key) || state.merged.has(key)) clearAutoMerge(key);
-  }
+  if (state.autoMerges.size) ensureAutoMergeTicker();
+  else stopAutoMergeTickerIfIdle();
   updateAutoMergeButtons();
+}
+
+function applyAutoMergeSnapshot(snapshot) {
+  if (!snapshot) return;
+  state.autoMerge = Boolean(snapshot.enabled);
+  els.autoMerge.checked = state.autoMerge;
+  syncAutoMerges({ autoMerge: snapshot });
+  persist();
+}
+
+async function configureServerAutoMerge() {
+  const response = await fetch("/api/auto-merge", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      enabled: state.autoMerge,
+      mode: state.mode,
+      jobs: 4
+    })
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.error || "Unable to configure auto merge");
+  applyAutoMergeSnapshot(data);
+  return data;
 }
 
 function failureDetail(row, fallback = "failed") {
@@ -673,6 +656,7 @@ async function refresh({ source = "manual" } = {}) {
     }
     notifyCompletedActions(state.activitySnapshot, data);
     state.activitySnapshot = buildActivitySnapshot(data);
+    if (data.autoMerge) applyAutoMergeSnapshot(data.autoMerge);
     state.data = data;
     render();
     scheduleAutoRefresh(data);
@@ -758,11 +742,11 @@ function render() {
   const view = views[state.view];
   els.viewKicker.textContent = view.kicker;
   els.viewTitle.textContent = view.title;
+  syncAutoMerges(data);
 
   const query = state.filter.trim().toLowerCase();
   const all = view.rows(data);
   const rows = query ? all.filter((row) => rowText(row).includes(query)) : all;
-  syncAutoMerges(rows);
   syncFilterUI(rows.length, all.length);
 
   els.content.innerHTML = rows.length
@@ -1080,7 +1064,11 @@ function setMode(mode) {
   if (state.mode === mode) return;
   state.mode = mode;
   persist();
-  refresh();
+  if (state.autoMerge) {
+    configureServerAutoMerge().finally(() => refresh());
+  } else {
+    refresh();
+  }
 }
 
 async function mergePullRequest(button) {
@@ -1207,6 +1195,12 @@ els.autoMerge.addEventListener("change", () => {
     for (const key of [...state.autoMerges.keys()]) clearAutoMerge(key);
   }
   render();
+  configureServerAutoMerge()
+    .then(() => refresh({ source: "auto-merge" }))
+    .catch((error) => {
+      setError(error.message);
+      showToast("Auto merge failed", error.message);
+    });
 });
 els.notifications.addEventListener("change", async () => {
   state.notifications = els.notifications.checked;
@@ -1349,4 +1343,8 @@ els.filter.value = state.filter;
 syncNotificationControl();
 renderInbox();
 ensureCountdownTimer();
-refresh();
+configureServerAutoMerge()
+  .catch((error) => {
+    setError(error.message);
+  })
+  .finally(() => refresh());

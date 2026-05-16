@@ -149,6 +149,8 @@ const FAILED_RUN_CONCLUSIONS = new Set(["failure", "cancelled", "timed_out", "ac
 const FAILED_JOB_CONCLUSIONS = new Set(["failure", "cancelled", "timed_out", "action_required", "startup_failure"]);
 const FAILED_CHECK_CONCLUSIONS = new Set(["FAILURE", "ERROR", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE"]);
 const RUNNING_DEPLOYMENT_STATES = new Set(["queued", "pending", "in_progress"]);
+const AUTO_MERGE_DELAY_MS = 15 * 1000;
+const AUTO_MERGE_SCAN_MS = 60 * 1000;
 const FAILURE_REASON_LABELS = {
   FAILURE: "failed",
   ERROR: "errored",
@@ -169,6 +171,19 @@ class HttpError extends Error {
     this.status = status;
   }
 }
+
+const autoMergeState = {
+  enabled: false,
+  options: {
+    mode: "all",
+    jobs: 4
+  },
+  candidates: new Map(),
+  running: false,
+  timer: null,
+  lastScanAt: null,
+  lastError: ""
+};
 
 function run(command, args, { timeoutMs = 120000 } = {}) {
   return new Promise((resolve, reject) => {
@@ -838,6 +853,7 @@ async function buildDashboardData(requestUrl) {
   }
 
   const prGroups = groupPullRequests(pullRequests);
+  syncAutoMergeFromStatus(pullRequests, { mode, jobs });
   const summary = {
     repos: repos.length || new Set(pullRequests.map((pr) => pr.repo)).size,
     passingPrs: prGroups.pass.length,
@@ -871,8 +887,196 @@ async function buildDashboardData(requestUrl) {
     },
     runners: {
       busy: busyRunners.sort((a, b) => `${a.scope}/${a.name}`.localeCompare(`${b.scope}/${b.name}`))
+    },
+    autoMerge: autoMergeSnapshot()
+  };
+}
+
+function autoMergeKey(repo, number) {
+  return `${repo}#${number}`;
+}
+
+function autoMergeSnapshot() {
+  return {
+    enabled: autoMergeState.enabled,
+    running: autoMergeState.running,
+    mode: autoMergeState.options.mode,
+    jobs: autoMergeState.options.jobs,
+    lastScanAt: autoMergeState.lastScanAt,
+    lastError: autoMergeState.lastError,
+    candidates: [...autoMergeState.candidates.values()]
+      .map((candidate) => ({
+        repo: candidate.repo,
+        number: candidate.number,
+        numberLabel: candidate.numberLabel,
+        title: candidate.title,
+        url: candidate.url,
+        deadline: new Date(candidate.deadline).toISOString(),
+        error: candidate.error || ""
+      }))
+      .sort(sortByRepoAndNumber)
+  };
+}
+
+function clearAutoMergeTimer() {
+  if (!autoMergeState.timer) return;
+  clearTimeout(autoMergeState.timer);
+  autoMergeState.timer = null;
+}
+
+function scheduleAutoMergeScan(delayMs = 0) {
+  if (!autoMergeState.enabled || autoMergeState.timer || autoMergeState.running) return;
+  autoMergeState.timer = setTimeout(runAutoMergeScan, Math.max(0, delayMs));
+}
+
+function syncAutoMergeCandidates(pullRequests) {
+  const now = Date.now();
+  const eligibleKeys = new Set();
+  for (const pr of pullRequests) {
+    if (!isAutoMergeCandidate(pr)) continue;
+    const key = autoMergeKey(pr.repo, pr.number);
+    eligibleKeys.add(key);
+    const existing = autoMergeState.candidates.get(key);
+    autoMergeState.candidates.set(key, {
+      repo: pr.repo,
+      number: pr.number,
+      numberLabel: pr.numberLabel,
+      title: pr.title,
+      url: pr.url,
+      deadline: existing?.deadline || now + AUTO_MERGE_DELAY_MS,
+      error: ""
+    });
+  }
+
+  for (const key of [...autoMergeState.candidates.keys()]) {
+    if (!eligibleKeys.has(key)) autoMergeState.candidates.delete(key);
+  }
+}
+
+function syncAutoMergeFromStatus(pullRequests, options) {
+  if (!autoMergeState.enabled) return;
+  if (autoMergeState.options.mode !== options.mode || autoMergeState.options.jobs !== options.jobs) return;
+  syncAutoMergeCandidates(pullRequests);
+  if (!autoMergeState.running) {
+    clearAutoMergeTimer();
+    scheduleAutoMergeScan(nextAutoMergeDelay());
+  }
+}
+
+function nextAutoMergeDelay() {
+  const now = Date.now();
+  const deadlines = [...autoMergeState.candidates.values()].map((candidate) => candidate.deadline);
+  const nextDeadline = deadlines.length ? Math.max(1000, Math.min(...deadlines) - now) : AUTO_MERGE_SCAN_MS;
+  return Math.min(nextDeadline, AUTO_MERGE_SCAN_MS);
+}
+
+async function executeMergePullRequest(repo, number, methodValue) {
+  const pr = await fetchPullRequestByNumber(repo, number);
+  const reason = mergeBlockReason(pr);
+  if (reason) {
+    throw new HttpError(409, reason);
+  }
+
+  const result = await githubRequest(`/repos/${repo}/pulls/${number}/merge`, {
+    method: "PUT",
+    body: {
+      merge_method: mergeMethod(methodValue)
+    }
+  });
+  const merged = Boolean(result?.merged);
+  const branchDelete = merged
+    ? await deletePullRequestBranch(pr)
+    : { deleted: false, skipped: true, reason: "Pull request was not merged." };
+
+  return {
+    merged,
+    message: result?.message || "Pull request merged.",
+    branchDelete,
+    pr: {
+      repo: pr.repo,
+      number: pr.number,
+      numberLabel: pr.numberLabel,
+      title: pr.title,
+      url: pr.url
     }
   };
+}
+
+async function runAutoMergeScan() {
+  clearAutoMergeTimer();
+  if (!autoMergeState.enabled || autoMergeState.running) return;
+
+  autoMergeState.running = true;
+  autoMergeState.lastError = "";
+  try {
+    const metrics = createScanMetrics();
+    await scanMetrics.run(metrics, async () => {
+      const me = await getAccount();
+      const pullRequests = await fetchPullRequests({
+        mode: autoMergeState.options.mode,
+        me,
+        jobs: autoMergeState.options.jobs
+      });
+      syncAutoMergeCandidates(pullRequests);
+    });
+    autoMergeState.lastScanAt = new Date().toISOString();
+
+    const now = Date.now();
+    const due = [...autoMergeState.candidates.values()].filter((candidate) => candidate.deadline <= now);
+    for (const candidate of due) {
+      const key = autoMergeKey(candidate.repo, candidate.number);
+      autoMergeState.candidates.delete(key);
+      try {
+        await executeMergePullRequest(candidate.repo, candidate.number);
+      } catch (error) {
+        if (!error.status || error.status >= 500) {
+          autoMergeState.candidates.set(key, {
+            ...candidate,
+            deadline: Date.now() + AUTO_MERGE_SCAN_MS,
+            error: error.message || "Auto merge failed"
+          });
+        } else {
+          autoMergeState.lastError = error.message || "Auto merge failed";
+        }
+      }
+    }
+  } catch (error) {
+    autoMergeState.lastError = error.message || "Auto merge scan failed";
+  } finally {
+    autoMergeState.running = false;
+    if (autoMergeState.enabled) scheduleAutoMergeScan(nextAutoMergeDelay());
+  }
+}
+
+async function autoMergeConfig(req, res) {
+  if (req.method === "GET") {
+    await sendJson(res, 200, autoMergeSnapshot());
+    return;
+  }
+  if (req.method !== "POST" && req.method !== "PUT") {
+    throw new HttpError(405, "Method not allowed");
+  }
+
+  const body = await readJsonBody(req);
+  const nextOptions = {
+    mode: normalizeMode(body.mode),
+    jobs: parseJobs(body.jobs)
+  };
+  const optionsChanged = autoMergeState.options.mode !== nextOptions.mode || autoMergeState.options.jobs !== nextOptions.jobs;
+  autoMergeState.enabled = Boolean(body.enabled);
+  autoMergeState.options = nextOptions;
+  autoMergeState.lastError = "";
+
+  if (autoMergeState.enabled) {
+    clearAutoMergeTimer();
+    if (optionsChanged) autoMergeState.candidates.clear();
+    scheduleAutoMergeScan(0);
+  } else {
+    clearAutoMergeTimer();
+    autoMergeState.candidates.clear();
+  }
+
+  await sendJson(res, 200, autoMergeSnapshot());
 }
 
 function groupPullRequests(pullRequests) {
@@ -895,6 +1099,10 @@ function mergeBlockReason(pr) {
     return "This pull request is not currently mergeable.";
   }
   return "";
+}
+
+function isAutoMergeCandidate(pr) {
+  return !mergeBlockReason(pr) && pr.checkCount > 0;
 }
 
 function sortByRepoAndNumber(a, b) {
@@ -997,35 +1205,8 @@ async function mergePullRequest(req, res) {
   const body = await readJsonBody(req);
   const { repo } = parseRepo(body.repo);
   const number = parsePullNumber(body.number);
-  const pr = await fetchPullRequestByNumber(repo, number);
-  const reason = mergeBlockReason(pr);
-  if (reason) {
-    throw new HttpError(409, reason);
-  }
-
-  const result = await githubRequest(`/repos/${repo}/pulls/${number}/merge`, {
-    method: "PUT",
-    body: {
-      merge_method: mergeMethod(body.mergeMethod)
-    }
-  });
-  const merged = Boolean(result?.merged);
-  const branchDelete = merged
-    ? await deletePullRequestBranch(pr)
-    : { deleted: false, skipped: true, reason: "Pull request was not merged." };
-
-  await sendJson(res, 200, {
-    merged,
-    message: result?.message || "Pull request merged.",
-    branchDelete,
-    pr: {
-      repo: pr.repo,
-      number: pr.number,
-      numberLabel: pr.numberLabel,
-      title: pr.title,
-      url: pr.url
-    }
-  });
+  autoMergeState.candidates.delete(autoMergeKey(repo, number));
+  await sendJson(res, 200, await executeMergePullRequest(repo, number, body.mergeMethod));
 }
 
 async function closePullRequest(req, res) {
@@ -1036,6 +1217,7 @@ async function closePullRequest(req, res) {
   const body = await readJsonBody(req);
   const { repo } = parseRepo(body.repo);
   const number = parsePullNumber(body.number);
+  autoMergeState.candidates.delete(autoMergeKey(repo, number));
   const pr = await fetchPullRequestByNumber(repo, number);
 
   const result = await githubRequest(`/repos/${repo}/pulls/${number}`, {
@@ -1102,6 +1284,10 @@ const server = http.createServer(async (req, res) => {
       await mergePullRequest(req, res);
       return;
     }
+    if (requestUrl.pathname === "/api/auto-merge") {
+      await autoMergeConfig(req, res);
+      return;
+    }
     if (requestUrl.pathname === "/api/pull-request/close") {
       await closePullRequest(req, res);
       return;
@@ -1127,4 +1313,11 @@ if (isMain) {
   });
 }
 
-export { SECURITY_HEADERS, classifyPullRequest, groupPullRequests, mergeBlockReason, openPullRequestSearchQuery };
+export {
+  SECURITY_HEADERS,
+  classifyPullRequest,
+  groupPullRequests,
+  isAutoMergeCandidate,
+  mergeBlockReason,
+  openPullRequestSearchQuery
+};

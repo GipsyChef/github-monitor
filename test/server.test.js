@@ -6,6 +6,7 @@ import {
   SECURITY_HEADERS,
   classifyPullRequest,
   groupPullRequests,
+  isAutoMergeCandidate,
   mergeBlockReason,
   openPullRequestSearchQuery
 } from "../server.js";
@@ -115,6 +116,29 @@ test("no-CI pull requests must be mergeable before merging", () => {
       mergeable: "UNKNOWN"
     }),
     "This pull request is not currently mergeable."
+  );
+});
+
+test("auto merge only targets passing pull requests with reported checks", () => {
+  assert.equal(
+    isAutoMergeCandidate({
+      state: "pass",
+      checkCount: 1,
+      isDraft: false,
+      hasConflict: false,
+      mergeable: "MERGEABLE"
+    }),
+    true
+  );
+  assert.equal(
+    isAutoMergeCandidate({
+      state: "pass",
+      checkCount: 0,
+      isDraft: false,
+      hasConflict: false,
+      mergeable: "MERGEABLE"
+    }),
+    false
   );
 });
 

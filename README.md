@@ -84,7 +84,7 @@ There are currently no runtime npm dependencies beyond Node.js itself; `npm ci` 
 - Browser notifications and an in-app inbox for CI/CD completions and new conflicts
 - Optional auto-merge countdown for passing PRs with completed checks
 
-The merge action is intentionally guarded: before merging, the server re-checks the PR and rejects drafts, conflicts, failing checks, running checks, and no-CI PRs that GitHub does not currently report as mergeable. No-CI PRs that are mergeable can be merged manually. After a successful merge, the server deletes the PR head branch. Auto merge is off by default; when enabled, visible eligible passing PRs with completed checks show a 30-second countdown on the merge button before running the same guarded merge action. PRs can also be closed from the dashboard regardless of CI state.
+The merge action is intentionally guarded: before merging, the server re-checks the PR and rejects drafts, conflicts, failing checks, running checks, and no-CI PRs that GitHub does not currently report as mergeable. No-CI PRs that are mergeable can be merged manually. After a successful merge, the server deletes the PR head branch. Auto merge is off by default; when enabled, the server monitors eligible passing PRs with completed checks in the selected scope, counts them down for 15 seconds, and runs the same guarded merge action even if the browser tab is not active. PRs can also be closed from the dashboard regardless of CI state.
 
 ## Stack
 
@@ -138,7 +138,7 @@ npm run dev
 - `CD audit`: scan CD/deploy/release/publish workflows, CD runs finished in the last 24 hours, failed latest CD runs, and running deployments
 - `Busy runners`: scan owner/org self-hosted runners
 - `Auto refresh`: schedules the next scan adaptively and shows a live countdown
-- `Auto merge`: when enabled, visible passing PRs with completed checks count down for 15 seconds and then merge automatically unless clicked first
+- `Auto merge`: when enabled, passing PRs with completed checks in the selected scope count down for 15 seconds on the server and then merge automatically unless clicked first
 
 ## Adaptive Refresh
 
