@@ -24,7 +24,8 @@ const state = {
   closing: new Set(),
   closed: new Set(),
   autoMerges: new Map(),
-  autoMergeTicker: null
+  autoMergeTicker: null,
+  autoMergeFollowUpTimer: null
 };
 
 const views = {
@@ -305,6 +306,7 @@ function stopAutoMergeTickerIfIdle() {
   if (state.autoMerges.size || !state.autoMergeTicker) return;
   clearInterval(state.autoMergeTicker);
   state.autoMergeTicker = null;
+  clearAutoMergeFollowUp();
 }
 
 function autoMergeButtonLabel(key) {
@@ -313,17 +315,40 @@ function autoMergeButtonLabel(key) {
   return remaining > 0 ? `Auto merge in ${remaining}s` : "Merging";
 }
 
+function ensureAutoMergeFollowUp() {
+  if (state.autoMergeFollowUpTimer) return;
+  state.autoMergeFollowUpTimer = setTimeout(async () => {
+    try {
+      await refresh({ source: "auto-merge-status" });
+    } finally {
+      state.autoMergeFollowUpTimer = null;
+    }
+  }, 4000);
+}
+
+function clearAutoMergeFollowUp() {
+  if (!state.autoMergeFollowUpTimer) return;
+  clearTimeout(state.autoMergeFollowUpTimer);
+  state.autoMergeFollowUpTimer = null;
+}
+
 function updateAutoMergeButtons() {
+  let hasMerging = false;
   document.querySelectorAll(".merge-button[data-auto-merge='true']").forEach((button) => {
     const key = mergeKey(button.dataset.repo, button.dataset.number);
     const label = autoMergeButtonLabel(key);
+    const isPending = label === "Merging";
+    if (isPending) hasMerging = true;
     button.textContent = label;
     button.setAttribute(
       "aria-label",
       `${label} ${button.dataset.repo || ""} #${button.dataset.number || ""}`.trim()
     );
-    button.title = label === "Merging" ? "Merging pull request..." : "Automatically merge when the timer reaches zero";
+    button.title = isPending ? "Merging pull request..." : "Automatically merge when the timer reaches zero";
+    if (isPending) button.disabled = true;
   });
+  if (hasMerging) ensureAutoMergeFollowUp();
+  else clearAutoMergeFollowUp();
   stopAutoMergeTickerIfIdle();
 }
 
@@ -777,6 +802,7 @@ function renderPrActions(row) {
   const isClosing = state.closing.has(key);
   const isClosed = state.closed.has(key);
   const isAutoMerge = !reason && !isMerging && !isMerged && state.autoMerges.has(key);
+  const isAutoMergePending = isAutoMerge && autoMergeRemainingSeconds(key) <= 0;
   const buttonLabel = isMerged ? "Merged" : isMerging ? "Merging" : isAutoMerge ? autoMergeButtonLabel(key) : "Merge";
   const buttonTitle = isMerged
     ? "Pull request merged"
@@ -800,7 +826,7 @@ function renderPrActions(row) {
          data-state="${isMerged ? "merged" : isMerging ? "merging" : "ready"}"
          data-auto-merge="${isAutoMerge ? "true" : "false"}"
          aria-label="${escapeHtml(buttonLabel)} ${escapeHtml(row.repo)} ${escapeHtml(row.numberLabel)}"
-         ${reason || isMerging || isMerged || isClosing ? "disabled" : ""}
+         ${reason || isMerging || isMerged || isClosing || isAutoMergePending ? "disabled" : ""}
          title="${escapeHtml(buttonTitle)}"
        >
          ${buttonLabel}

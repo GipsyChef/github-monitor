@@ -27,6 +27,8 @@ This project follows [Semantic Versioning](https://semver.org/) where practical.
 
 ### Fixed
 
+- Auto merge button now updates as soon as the server completes the merge, instead of staying stuck on "Merging" until the next periodic refresh.
+- Auto merge button is disabled while in the "Merging" state so a user cannot fire a duplicate merge request that races the server-side auto-merge scan.
 - Merge requests are rechecked server-side before merging and reject drafts, conflicts, failing checks, running checks, and no-CI PRs that GitHub does not currently report as mergeable.
 - Successful merges now delete the PR head branch when GitHub allows it.
 - Scorecard and code scanning workflows were corrected and gated appropriately for private repository state.
