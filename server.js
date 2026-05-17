@@ -819,6 +819,33 @@ async function fetchBusyRunners({ includeRepoRunners, repos, pullRequests, mode,
   );
 }
 
+async function buildBusyRunnerData(requestUrl) {
+  const params = requestUrl.searchParams;
+  const mode = normalizeMode(params.get("mode"));
+  const jobs = parseJobs(params.get("jobs"));
+  const includeRepoRunners = parseBool(params.get("includeRepoRunners"), false);
+  const me = await getAccount();
+  const pullRequests = await fetchPullRequests({ mode, me, jobs });
+  const repos = includeRepoRunners ? await listRepos({ mode, me, pullRequests, jobs }) : [];
+  const busyRunners = await fetchBusyRunners({ includeRepoRunners, repos, pullRequests, mode, me, jobs });
+  const sortedBusyRunners = busyRunners.sort((a, b) =>
+    `${a.level}/${a.scope}/${a.name}`.localeCompare(`${b.level}/${b.scope}/${b.name}`)
+  );
+  return {
+    account: me,
+    generatedAt: new Date().toISOString(),
+    options: { mode, jobs, includeRepoRunners },
+    summary: {
+      busyRunners: sortedBusyRunners.length,
+      repos: repos.length || new Set(pullRequests.map((pr) => pr.repo)).size
+    },
+    runners: {
+      busy: sortedBusyRunners
+    },
+    rateLimit: snapshotRateLimit(scanMetrics.getStore() || createScanMetrics())
+  };
+}
+
 async function buildDashboardData(requestUrl) {
   const params = requestUrl.searchParams;
   const mode = normalizeMode(params.get("mode"));
@@ -1280,6 +1307,25 @@ const server = http.createServer(async (req, res) => {
       }
       return;
     }
+    if (requestUrl.pathname === "/api/runners/status") {
+      if (req.method !== "GET") {
+        throw new HttpError(405, "Method not allowed");
+      }
+      const metrics = createScanMetrics();
+      try {
+        await scanMetrics.run(metrics, async () => {
+          const data = await buildBusyRunnerData(requestUrl);
+          await sendJson(res, 200, data);
+        });
+      } catch (error) {
+        const status = error.status || 500;
+        await sendJson(res, status, {
+          error: error.message || "Unexpected error",
+          rateLimit: snapshotRateLimit(metrics)
+        });
+      }
+      return;
+    }
     if (requestUrl.pathname === "/api/pull-request/merge") {
       await mergePullRequest(req, res);
       return;
@@ -1319,5 +1365,6 @@ export {
   groupPullRequests,
   isAutoMergeCandidate,
   mergeBlockReason,
-  openPullRequestSearchQuery
+  openPullRequestSearchQuery,
+  server
 };
