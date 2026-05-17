@@ -156,12 +156,14 @@ The notification inbox is kept in localStorage for quick follow-up and prunes en
 
 ```text
 GET /api/status?mode=all&includeCd=1&includeRunners=0&includeRepoRunners=0&jobs=4
+GET /api/runners/status?mode=all&includeRepoRunners=0&jobs=4
 POST /api/pull-request/merge
 POST /api/pull-request/close
 GET /api/health
 ```
 
 `mode` can be `all`, `owned`, or `mine`.
+The runner status endpoint returns only busy self-hosted runners, using the same runner scan as the dashboard. Set `includeRepoRunners=1` to also scan repository-level runners.
 Merge requests must include JSON like `{"repo":"owner/name","number":123}`. The server re-checks the PR before merging, rejects drafts, conflicts, failing checks, running checks, and no-CI PRs that GitHub does not currently report as mergeable, then deletes the PR head branch after a successful merge. Close requests use the same JSON shape and close the PR without requiring CI.
 
 ## Security

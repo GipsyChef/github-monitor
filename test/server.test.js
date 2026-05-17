@@ -8,7 +8,8 @@ import {
   groupPullRequests,
   isAutoMergeCandidate,
   mergeBlockReason,
-  openPullRequestSearchQuery
+  openPullRequestSearchQuery,
+  server
 } from "../server.js";
 
 const indexHtml = readFileSync(new URL("../public/index.html", import.meta.url), "utf8");
@@ -166,4 +167,90 @@ test("security headers restrict privileged local dashboard surfaces", () => {
   assert.match(SECURITY_HEADERS["content-security-policy"], /frame-ancestors 'none'/);
   assert.equal(SECURITY_HEADERS["x-content-type-options"], "nosniff");
   assert.equal(SECURITY_HEADERS["referrer-policy"], "no-referrer");
+});
+
+test("runner status endpoint returns only busy runners", async () => {
+  const previousFetch = globalThis.fetch;
+  const previousToken = process.env.GITHUB_TOKEN;
+  process.env.GITHUB_TOKEN = "test-token";
+
+  globalThis.fetch = async (url, options = {}) => {
+    const requestUrl = new URL(String(url));
+    const body = options.body ? JSON.parse(options.body) : {};
+    const headers = {
+      "content-type": "application/json",
+      "x-ratelimit-limit": "5000",
+      "x-ratelimit-remaining": "4990",
+      "x-ratelimit-reset": String(Math.floor(Date.now() / 1000) + 3600),
+      "x-ratelimit-resource": requestUrl.pathname === "/graphql" ? "graphql" : "core"
+    };
+
+    if (requestUrl.pathname === "/user") {
+      return Response.json({ login: "maintainer" }, { headers });
+    }
+    if (requestUrl.pathname === "/user/orgs") {
+      return Response.json([{ login: "acme" }], { headers });
+    }
+    if (requestUrl.pathname === "/graphql") {
+      assert.match(body.variables.q, /is:pr state:open archived:false owner:/);
+      return Response.json({
+        data: {
+          search: {
+            pageInfo: { hasNextPage: false, endCursor: null },
+            nodes: []
+          }
+        }
+      }, { headers });
+    }
+    if (requestUrl.pathname === "/orgs/acme/actions/runners") {
+      return Response.json({
+        runners: [
+          {
+            name: "busy-linux",
+            status: "online",
+            busy: true,
+            labels: [{ name: "self-hosted" }, { name: "linux" }]
+          },
+          {
+            name: "idle-linux",
+            status: "online",
+            busy: false,
+            labels: [{ name: "self-hosted" }]
+          }
+        ]
+      }, { headers });
+    }
+    if (requestUrl.pathname === "/orgs/maintainer/actions/runners") {
+      return Response.json({ runners: [] }, { headers });
+    }
+
+    return Response.json({ message: "not found" }, { status: 404, headers });
+  };
+
+  const testServer = await new Promise((resolve) => {
+    const listener = server.listen(0, "127.0.0.1", () => resolve(listener));
+  });
+
+  try {
+    const { port } = testServer.address();
+    const response = await previousFetch(`http://127.0.0.1:${port}/api/runners/status?mode=all&jobs=1`);
+    const data = await response.json();
+
+    assert.equal(response.status, 200);
+    assert.equal(data.summary.busyRunners, 1);
+    assert.deepEqual(data.runners.busy, [
+      {
+        level: "ORG",
+        scope: "acme",
+        name: "busy-linux",
+        status: "online",
+        labels: ["self-hosted", "linux"]
+      }
+    ]);
+  } finally {
+    await new Promise((resolve, reject) => testServer.close((error) => (error ? reject(error) : resolve())));
+    globalThis.fetch = previousFetch;
+    if (previousToken == null) delete process.env.GITHUB_TOKEN;
+    else process.env.GITHUB_TOKEN = previousToken;
+  }
 });
