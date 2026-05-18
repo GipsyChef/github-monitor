@@ -657,6 +657,10 @@ function isCdWorkflow(workflow) {
   return CD_WORKFLOW_PATTERN.test(workflow.name || "") || CD_WORKFLOW_PATTERN.test(workflow.path || "");
 }
 
+function isCdWorkflowRun(run) {
+  return CD_WORKFLOW_PATTERN.test(run.name || "") || CD_WORKFLOW_PATTERN.test(run.path || "");
+}
+
 async function fetchCdWorkflows(repo) {
   const workflows = await githubRestAll(`/repos/${repo}/actions/workflows`, (json) => json?.workflows || []);
   return workflows.filter((workflow) => workflow.state === "active" && isCdWorkflow(workflow));
@@ -737,6 +741,29 @@ async function fetchCdForRepo(repo) {
     }
   }
   return { failed, finished, running };
+}
+
+async function fetchRunningActionsForRepo(repo) {
+  try {
+    const json = await githubRequest(`/repos/${repo}/actions/runs`, { query: { per_page: 20 } });
+    const runs = json?.workflow_runs || [];
+    return runs
+      .filter((run) => RUNNING_RUN_STATUSES.has(run.status))
+      .filter((run) => !isCdWorkflowRun(run))
+      .map((run) => ({
+        kind: "workflowRun",
+        createdAt: run.created_at || "",
+        repo,
+        workflow: run.name || "Workflow",
+        runNumber: `#${run.run_number}`,
+        status: run.status || "",
+        branch: run.head_branch || "",
+        title: run.display_title || run.name || "",
+        url: run.html_url || ""
+      }));
+  } catch {
+    return [];
+  }
 }
 
 async function fetchRunningDeploymentsForRepo(repo) {
@@ -859,11 +886,15 @@ async function buildDashboardData(requestUrl) {
   let failedCd = [];
   let finishedCd = [];
   let runningCd = [];
+  let runningActions = [];
   let runningDeployments = [];
   let busyRunners = [];
 
-  if (includeCd || includeRepoRunners) {
-    repos = await listRepos({ mode, me, pullRequests, jobs });
+  repos = await listRepos({ mode, me, pullRequests, jobs });
+
+  if (repos.length) {
+    const actionGroups = await mapLimit(repos, jobs, fetchRunningActionsForRepo);
+    runningActions = uniqueBy(actionGroups.flat(), (run) => run.url || JSON.stringify(run));
   }
 
   if (includeCd && repos.length) {
@@ -886,7 +917,7 @@ async function buildDashboardData(requestUrl) {
     passingPrs: prGroups.pass.length,
     noCiPrs: prGroups.noCi.length,
     failingPrs: prGroups.fail.length,
-    runningPrs: prGroups.running.length,
+    runningPrs: prGroups.running.length + runningActions.length,
     conflictPrs: prGroups.conflicts.length,
     runningCd: runningCd.length,
     finishedCd: finishedCd.length,
@@ -904,6 +935,9 @@ async function buildDashboardData(requestUrl) {
     rateLimit,
     refresh: recommendRefresh(summary, { mode, jobs, includeCd, includeRunners, includeRepoRunners }, rateLimit),
     pullRequests: prGroups,
+    actions: {
+      running: runningActions.sort(sortByCreatedDesc)
+    },
     cd: {
       running: runningCd.sort(sortByCreatedDesc),
       finished: finishedCd.sort(sortByCreatedDesc),

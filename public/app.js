@@ -46,9 +46,9 @@ const views = {
   running: {
     kicker: "Open PRs with CI running",
     title: "Checks still in motion",
-    empty: "No checks currently running.",
+    empty: "No checks or workflow runs currently running.",
     color: "amber",
-    rows: (data) => data.pullRequests.running
+    rows: (data) => [...(data.pullRequests.running || []), ...(data.actions?.running || [])]
   },
   pass: {
     kicker: "Passing CI",
@@ -780,6 +780,7 @@ function render() {
 }
 
 function renderRow(row, viewKey, view) {
+  if (viewKey === "running" && row.kind === "workflowRun") return renderWorkflowRunRow(row, view);
   if (["pass", "noCi", "fail", "running", "conflicts"].includes(viewKey)) return renderPrRow(row, view);
   if (["runningCd", "finishedCd", "failedCd"].includes(viewKey)) return renderCdRow(row, view, viewKey);
   if (viewKey === "deployments") return renderDeploymentRow(row, view);
@@ -908,6 +909,22 @@ function renderCdRow(row, view, viewKey) {
       </div>
       <div class="meta">${escapeHtml(row.workflow)} ${escapeHtml(row.runNumber)}</div>
       <div class="tag">${escapeHtml(status)}</div>
+      <div class="meta">${escapeHtml(detail)}</div>
+      ${row.url ? `<a class="open-link" href="${escapeHtml(row.url)}" target="_blank" rel="noreferrer">Open Run</a>` : ""}
+    </article>
+  `;
+}
+
+function renderWorkflowRunRow(row, view) {
+  const detail = [row.branch, formatTime(row.createdAt)].filter(Boolean).join(" · ");
+  return `
+    <article class="row" data-href="${escapeHtml(row.url || "")}" style="--accent: var(--${view.color}); --soft: var(--${view.color}-soft);">
+      <div class="row-main">
+        <div class="repo">${escapeHtml(row.repo)}</div>
+        <div class="title">${escapeHtml(row.title || row.workflow)}</div>
+      </div>
+      <div class="meta">${escapeHtml(row.workflow)} ${escapeHtml(row.runNumber)}</div>
+      <div class="tag">${escapeHtml(row.status || "running")}</div>
       <div class="meta">${escapeHtml(detail)}</div>
       ${row.url ? `<a class="open-link" href="${escapeHtml(row.url)}" target="_blank" rel="noreferrer">Open Run</a>` : ""}
     </article>
