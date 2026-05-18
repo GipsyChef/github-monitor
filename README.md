@@ -74,6 +74,7 @@ There are currently no runtime npm dependencies beyond Node.js itself; `npm ci` 
 ## What It Shows
 
 - Open PRs from non-archived repositories, grouped by passing, no-CI, failing, running, and merge conflict states
+- Running non-CD GitHub Actions workflow runs, including jobs that are not currently represented by an open PR status rollup
 - Optional CD/deploy/release/publish workflow audit
 - CD runs that finished in the last 24 hours
 - Latest failed CD runs from the last 3 days
