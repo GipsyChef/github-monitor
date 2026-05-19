@@ -2,6 +2,7 @@ const STORAGE_KEY = "pr-deck:v1";
 const INBOX_KEY = "pr-deck:inbox:v1";
 const INBOX_MAX = 60;
 const INBOX_TTL_MS = 24 * 60 * 60 * 1000;
+const REFRESH_RETRY_DELAYS_MS = [15_000, 30_000, 60_000, 120_000, 300_000];
 
 const persisted = loadPersisted();
 
@@ -13,6 +14,7 @@ const state = {
   notifications: persisted.notifications !== false,
   activitySnapshot: null,
   refreshTimer: null,
+  refreshRetryCount: 0,
   countdownTimer: null,
   nextRefreshAt: null,
   refreshReason: "",
@@ -655,6 +657,23 @@ function scheduleAutoRefresh(data) {
   renderRefreshStatus();
 }
 
+function scheduleRefreshRetry() {
+  clearRefreshTimer();
+  if (!els.autoRefresh.checked) {
+    state.nextRefreshAt = null;
+    renderRefreshStatus();
+    return;
+  }
+
+  const delay = REFRESH_RETRY_DELAYS_MS[Math.min(state.refreshRetryCount, REFRESH_RETRY_DELAYS_MS.length - 1)];
+  state.refreshRetryCount += 1;
+  state.nextRefreshAt = new Date(Date.now() + delay).toISOString();
+  state.refreshReason = "retrying after error";
+  state.refreshTimer = setTimeout(() => refresh({ source: "retry" }), delay);
+  ensureCountdownTimer();
+  renderRefreshStatus();
+}
+
 function buildParams() {
   return new URLSearchParams({
     mode: state.mode,
@@ -683,17 +702,12 @@ async function refresh({ source = "manual" } = {}) {
     state.activitySnapshot = buildActivitySnapshot(data);
     if (data.autoMerge) applyAutoMergeSnapshot(data.autoMerge);
     state.data = data;
+    state.refreshRetryCount = 0;
     render();
     scheduleAutoRefresh(data);
   } catch (error) {
     setError(error.message);
-    if (els.autoRefresh.checked && source === "auto") {
-      state.nextRefreshAt = new Date(Date.now() + 5 * 60 * 1000).toISOString();
-      state.refreshReason = "error backoff";
-      clearRefreshTimer();
-      state.refreshTimer = setTimeout(() => refresh({ source: "auto" }), 5 * 60 * 1000);
-      renderRefreshStatus();
-    }
+    scheduleRefreshRetry();
   } finally {
     setLoading(false);
   }
