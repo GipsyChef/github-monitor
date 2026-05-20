@@ -3,6 +3,8 @@ const INBOX_KEY = "pr-deck:inbox:v1";
 const INBOX_MAX = 60;
 const INBOX_TTL_MS = 24 * 60 * 60 * 1000;
 const REFRESH_RETRY_DELAYS_MS = [15_000, 30_000, 60_000, 120_000, 300_000];
+const QUOTA_SLOW_REMAINING = 200;
+const QUOTA_SLOW_RATIO = 0.15;
 
 const persisted = loadPersisted();
 
@@ -15,6 +17,7 @@ const state = {
   activitySnapshot: null,
   refreshTimer: null,
   refreshRetryCount: 0,
+  loading: false,
   countdownTimer: null,
   nextRefreshAt: null,
   refreshReason: "",
@@ -270,10 +273,14 @@ function formatDuration(ms) {
 }
 
 function rowText(row) {
-  return Object.values(row)
-    .flatMap((value) => (Array.isArray(value) ? value : [value]))
-    .join(" ")
-    .toLowerCase();
+  return flattenText(row).join(" ").toLowerCase();
+}
+
+function flattenText(value) {
+  if (value == null) return [];
+  if (Array.isArray(value)) return value.flatMap(flattenText);
+  if (typeof value === "object") return Object.values(value).flatMap(flattenText);
+  return [String(value)];
 }
 
 function actionKey(row) {
@@ -588,13 +595,20 @@ function notifyCompletedActions(previousSnapshot, data) {
 }
 
 function setLoading(isLoading) {
+  state.loading = isLoading;
   els.loading.classList.toggle("hidden", !isLoading);
-  els.refresh.disabled = isLoading;
+  updateRefreshButtonState();
 }
 
-function setError(message) {
+function setError(message, tone = "error") {
   els.errorPanel.textContent = message || "";
   els.errorPanel.classList.toggle("hidden", !message);
+  els.errorPanel.classList.toggle("warning", Boolean(message) && tone === "warning");
+}
+
+function dashboardWarning(data) {
+  const warnings = Array.isArray(data?.warnings) ? data.warnings.filter(Boolean) : [];
+  return warnings.join(" ");
 }
 
 function clearRefreshTimer() {
@@ -620,9 +634,87 @@ function tightestRateLimit(data) {
   return data?.rateLimit?.tightest || null;
 }
 
+function quotaBlockFromRateLimit(rateLimit) {
+  const tightest = rateLimit?.tightest;
+  if (!tightest) return null;
+  const remaining = Number(tightest.remaining);
+  const limit = Math.max(1, Number(tightest.limit) || 1);
+  const remainingRatio = remaining / limit;
+  if (remaining >= QUOTA_SLOW_REMAINING && remainingRatio >= QUOTA_SLOW_RATIO) return null;
+  const resetAt = tightest.resetAt || "";
+  const resetTime = new Date(resetAt).getTime();
+  if (!Number.isFinite(resetTime) || resetTime <= Date.now()) return null;
+  return {
+    resource: tightest.resource || "GitHub",
+    resetAt,
+    retryAt: new Date(resetTime + 30_000).toISOString(),
+    remaining,
+    limit
+  };
+}
+
+function quotaRefreshBlock(data = state.data) {
+  const quota = data?.refresh?.quota;
+  if (quota?.blocked) {
+    const retryAt = state.nextRefreshAt || quota.resetAt;
+    const retryTime = new Date(retryAt).getTime();
+    if (Number.isFinite(retryTime) && retryTime > Date.now()) {
+      return {
+        resource: quota.resource || "GitHub",
+        retryAt,
+        remaining: quota.remaining,
+        limit: quota.limit
+      };
+    }
+  }
+  return quotaBlockFromRateLimit(data?.rateLimit);
+}
+
+function updateRefreshButtonState() {
+  const quotaBlock = quotaRefreshBlock();
+  const disabled = Boolean(state.loading || quotaBlock);
+  els.refresh.disabled = disabled;
+  els.refresh.classList.toggle("loading", Boolean(state.loading));
+  els.refresh.classList.toggle("quota-blocked", Boolean(quotaBlock && !state.loading));
+  els.refresh.setAttribute(
+    "aria-label",
+    quotaBlock ? "Refresh paused until GitHub API quota resets" : "Refresh now"
+  );
+  els.refresh.title = quotaBlock
+    ? `Refresh paused for ${quotaBlock.resource} API quota until ${formatTime(quotaBlock.retryAt)}`
+    : "Refresh (R)";
+}
+
+function quotaBlockMessage(block) {
+  if (!block) return "";
+  const quota = Number.isFinite(Number(block.remaining)) && Number.isFinite(Number(block.limit))
+    ? ` (${block.remaining}/${block.limit})`
+    : "";
+  return `${block.resource} API quota is low${quota}. Refresh is paused until ${formatTime(block.retryAt)}.`;
+}
+
+function rateLimitTooltip(tightest, quotaState, quotaBlock) {
+  if (!tightest) {
+    return "GitHub API quota is not available until the first scan finishes.";
+  }
+  const resource = tightest.resource || "GitHub";
+  const remaining = tightest.remaining ?? "?";
+  const limit = tightest.limit ?? "?";
+  const reset = formatTime(tightest.resetAt);
+  const base = `${resource} is the GitHub API quota bucket used by this scan. ${remaining} of ${limit} requests remain until it resets at ${reset}.`;
+  if (quotaBlock) {
+    return `${base} Low means another scan could exhaust the bucket, so refresh is paused until after the reset window.`;
+  }
+  if (quotaState === "watch") {
+    return `${base} Watch means quota is getting tight, so the dashboard slows refreshes.`;
+  }
+  return `${base} The dashboard adjusts refresh timing from this quota.`;
+}
+
 function renderRefreshStatus() {
   const data = state.data;
   const tightest = tightestRateLimit(data);
+  const quotaBlock = quotaRefreshBlock(data);
   if (!els.autoRefresh.checked) {
     els.nextRefresh.textContent = "paused";
   } else if (!state.nextRefreshAt) {
@@ -633,12 +725,21 @@ function renderRefreshStatus() {
   }
 
   if (tightest) {
-    els.rateLimit.textContent = `${tightest.resource}: ${tightest.remaining}/${tightest.limit} · resets ${formatTime(tightest.resetAt)}`;
+    const quotaState = quotaBlock ? "low" : data?.refresh?.quota?.status === "watch" ? "watch" : "";
+    els.rateLimit.textContent = `${tightest.resource}: ${tightest.remaining}/${tightest.limit}${quotaState ? ` · ${quotaState}` : ""} · resets ${formatTime(tightest.resetAt)}`;
+    const tooltip = rateLimitTooltip(tightest, quotaState, quotaBlock);
+    els.rateLimit.title = tooltip;
+    els.rateLimit.setAttribute("aria-label", tooltip);
   } else if (data?.rateLimit) {
     els.rateLimit.textContent = `Quota: ${data.rateLimit.requestCount} requests this scan`;
+    els.rateLimit.title = "GitHub API request count for the most recent scan.";
+    els.rateLimit.setAttribute("aria-label", els.rateLimit.title);
   } else {
     els.rateLimit.textContent = "Quota: waiting";
+    els.rateLimit.title = "GitHub API quota will appear after the first scan finishes.";
+    els.rateLimit.setAttribute("aria-label", els.rateLimit.title);
   }
+  updateRefreshButtonState();
 }
 
 function scheduleAutoRefresh(data) {
@@ -665,10 +766,13 @@ function scheduleRefreshRetry() {
     return;
   }
 
-  const delay = REFRESH_RETRY_DELAYS_MS[Math.min(state.refreshRetryCount, REFRESH_RETRY_DELAYS_MS.length - 1)];
+  const quotaBlock = quotaRefreshBlock();
+  const quotaDelay = quotaBlock ? new Date(quotaBlock.retryAt).getTime() - Date.now() : 0;
+  const retryDelay = REFRESH_RETRY_DELAYS_MS[Math.min(state.refreshRetryCount, REFRESH_RETRY_DELAYS_MS.length - 1)];
+  const delay = Math.max(5000, quotaBlock ? quotaDelay : retryDelay);
   state.refreshRetryCount += 1;
   state.nextRefreshAt = new Date(Date.now() + delay).toISOString();
-  state.refreshReason = "retrying after error";
+  state.refreshReason = quotaBlock ? `Paused for ${quotaBlock.resource} API quota` : "retrying after error";
   state.refreshTimer = setTimeout(() => refresh({ source: "retry" }), delay);
   ensureCountdownTimer();
   renderRefreshStatus();
@@ -686,6 +790,15 @@ function buildParams() {
 
 async function refresh({ source = "manual" } = {}) {
   if (source === "manual") clearRefreshTimer();
+  const quotaBlock = quotaRefreshBlock();
+  if (quotaBlock) {
+    state.nextRefreshAt = quotaBlock.retryAt;
+    state.refreshReason = `Paused for ${quotaBlock.resource} API quota`;
+    setError(quotaBlockMessage(quotaBlock), "warning");
+    if (els.autoRefresh.checked) scheduleAutoRefresh(state.data);
+    renderRefreshStatus();
+    return;
+  }
   setLoading(true);
   setError("");
   try {
@@ -773,6 +886,7 @@ function render() {
   els.generatedAt.textContent = formatRelative(data.generatedAt);
   ensureGeneratedTicker();
 
+  setError(dashboardWarning(data), "warning");
   renderRefreshStatus();
   renderMetrics(data);
   updateTabTitle(data);
@@ -796,6 +910,7 @@ function render() {
 function renderRow(row, viewKey, view) {
   if (viewKey === "running" && row.kind === "workflowRun") return renderWorkflowRunRow(row, view);
   if (["pass", "noCi", "fail", "running", "conflicts"].includes(viewKey)) return renderPrRow(row, view);
+  if (viewKey === "finishedCd") return renderFinishedCdRow(row, view);
   if (["runningCd", "finishedCd", "failedCd"].includes(viewKey)) return renderCdRow(row, view, viewKey);
   if (viewKey === "deployments") return renderDeploymentRow(row, view);
   return renderRunnerRow(row, view);
@@ -925,6 +1040,331 @@ function renderCdRow(row, view, viewKey) {
       <div class="tag">${escapeHtml(status)}</div>
       <div class="meta">${escapeHtml(detail)}</div>
       ${row.url ? `<a class="open-link" href="${escapeHtml(row.url)}" target="_blank" rel="noreferrer">Open Run</a>` : ""}
+    </article>
+  `;
+}
+
+function statusClass(status) {
+  return String(status || "").toLowerCase().replace(/[^a-z0-9_-]+/g, "-") || "unknown";
+}
+
+function formatSignedCount(value, prefix) {
+  const number = Number(value || 0);
+  if (!number) return "";
+  return `${prefix}${number}`;
+}
+
+function renderChangedPages(summary) {
+  const pages = summary?.changedPages || [];
+  if (!pages.length) {
+    return `
+      <li class="review-empty">
+        No route-like page file was detected. Use the changed file links below and the run link to inspect the deployed behavior.
+      </li>
+    `;
+  }
+  return pages.map((page) => {
+    const label = page.environment ? `${page.label} · ${page.environment}` : page.label;
+    const pageLink = page.url
+      ? `<a class="page-link" href="${escapeHtml(page.url)}" target="_blank" rel="noreferrer">${escapeHtml(label)}</a>`
+      : `<span class="page-link page-link-muted">${escapeHtml(label)}</span>`;
+    const source = page.sourceUrl
+      ? `<a class="source-link" href="${escapeHtml(page.sourceUrl)}" target="_blank" rel="noreferrer">${escapeHtml(page.sourcePath)}</a>`
+      : `<span>${escapeHtml(page.sourcePath)}</span>`;
+    return `
+      <li>
+        <div class="review-link-row">
+          ${pageLink}
+          ${source}
+        </div>
+        <p>${escapeHtml(page.lookFor || "Check the changed page in the deployed app.")}</p>
+      </li>
+    `;
+  }).join("");
+}
+
+function renderChangedFiles(summary) {
+  const files = summary?.changedFiles || [];
+  if (!files.length) {
+    return `<li class="review-empty">No deployment diff was available for this run. Use the recent merged PR summary below.</li>`;
+  }
+  const rows = files.map((file) => {
+    const delta = [formatSignedCount(file.additions, "+"), formatSignedCount(file.deletions, "-")].filter(Boolean).join(" ");
+    const fileLabel = file.url
+      ? `<a class="source-link" href="${escapeHtml(file.url)}" target="_blank" rel="noreferrer">${escapeHtml(file.path)}</a>`
+      : `<span>${escapeHtml(file.path)}</span>`;
+    return `
+      <li>
+        <div class="file-change-line">
+          ${fileLabel}
+          <span class="file-status">${escapeHtml(file.status || "changed")}${delta ? ` · ${escapeHtml(delta)}` : ""}</span>
+        </div>
+        <p>${escapeHtml(file.lookFor || "Check the affected behavior.")}</p>
+      </li>
+    `;
+  }).join("");
+  const hidden = summary.hiddenFileCount
+    ? `<p class="review-more">${escapeHtml(summary.hiddenFileCount)} more changed files are available in the commit link.</p>`
+    : "";
+  return `${rows}${hidden}`;
+}
+
+function renderPrPageLinks(pr) {
+  const pages = pr.changedPages || [];
+  if (!pages.length) {
+    if (!pr.productionUrl) return "";
+    const label = pr.productionEnvironment ? `Production site · ${pr.productionEnvironment}` : "Production site";
+    return `
+      <div class="pr-page-links">
+        <a class="page-link page-link-quiet visual-page-link" href="${escapeHtml(pr.productionUrl)}" target="_blank" rel="noreferrer">${escapeHtml(label)}</a>
+      </div>
+    `;
+  }
+  return `
+    <div class="pr-page-links">
+      ${pages.slice(0, 3).map((page) => {
+        const label = page.environment ? `${page.label} · ${page.environment}` : page.label;
+        return page.url
+          ? `<a class="page-link" href="${escapeHtml(page.url)}" target="_blank" rel="noreferrer">${escapeHtml(label)}</a>`
+          : `<span class="page-link page-link-muted">${escapeHtml(label)}</span>`;
+      }).join("")}
+      ${pages.length > 3 ? `<span class="page-link page-link-muted">+${escapeHtml(pages.length - 3)} more</span>` : ""}
+    </div>
+  `;
+}
+
+function renderPrFileLinks(pr) {
+  const files = pr.changedFiles || [];
+  if (!files.length) return "";
+  return `
+    <details class="source-details">
+      <summary>Files changed (${escapeHtml(pr.filesChanged || files.length)})</summary>
+      <div class="pr-file-links">
+      ${files.slice(0, 4).map((file) => `
+        <a class="source-link" href="${escapeHtml(file.url || pr.url)}" target="_blank" rel="noreferrer">${escapeHtml(file.path)}</a>
+      `).join("")}
+      ${pr.hiddenFileCount ? `<span class="file-status">+${escapeHtml(pr.hiddenFileCount)} more</span>` : ""}
+      </div>
+    </details>
+  `;
+}
+
+function uniqueVisualPages(summary) {
+  const seen = new Set();
+  const groups = [
+    ...(summary?.changedPages || []),
+    ...(summary?.mergedPullRequests || []).flatMap((item) => item.changedPages || []),
+    ...(summary?.recentCommits || []).flatMap((item) => item.changedPages || [])
+  ];
+  return groups.filter((page) => {
+    const key = page.url || page.path || page.label;
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  }).concat(
+    !seen.size && summary?.deployUrl
+      ? [{
+          label: "Production site",
+          path: "/",
+          url: summary.deployUrl,
+          environment: summary.environment || "production"
+        }]
+      : []
+  );
+}
+
+function renderVisualReviewLinks(summary) {
+  const pages = uniqueVisualPages(summary);
+  if (!pages.length) return "";
+  return `
+    <section class="visual-review" aria-label="Production pages to visually verify">
+      <div class="visual-review-head">
+        <h3>Visual checks in production</h3>
+        <span>${escapeHtml(pages.length)} ${pages.length === 1 ? "page" : "pages"}</span>
+      </div>
+      <div class="visual-link-grid">
+        ${pages.slice(0, 12).map((page) => {
+          const label = page.environment ? `${page.label} · ${page.environment}` : page.label;
+          return page.url
+            ? `<a class="page-link visual-page-link" href="${escapeHtml(page.url)}" target="_blank" rel="noreferrer">${escapeHtml(label)}</a>`
+            : `<span class="page-link page-link-muted visual-page-link">${escapeHtml(label)}</span>`;
+        }).join("")}
+      </div>
+    </section>
+  `;
+}
+
+function renderMergedPrSummary(summary) {
+  const prs = summary?.mergedPullRequests || [];
+  if (!prs.length) {
+    return `<li class="review-empty">No recent merged PRs were available from GitHub for this repository.</li>`;
+  }
+  return prs.map((pr) => `
+    <li class="summary-item">
+      <div class="summary-item-primary">
+        <div class="merged-pr-head">
+          <a class="source-link merged-pr-title" href="${escapeHtml(pr.url)}" target="_blank" rel="noreferrer">
+            ${escapeHtml(pr.numberLabel)} ${escapeHtml(pr.title)}
+          </a>
+          <span class="file-status">${escapeHtml(pr.filesChanged || 0)} files · ${escapeHtml(formatTime(pr.mergedAt))} · @${escapeHtml(pr.author)}</span>
+        </div>
+        ${renderPrPageLinks(pr)}
+      </div>
+      <details class="summary-item-details">
+        <summary>Verification details</summary>
+        <p><strong>Look for:</strong> ${escapeHtml(pr.changedPages?.length ? (pr.inferredPages ? "The inferred production page should reflect this PR's behavior if it shipped there." : "The linked production page should reflect the PR behavior visually.") : "Use the PR link, then inspect the affected app area visually.")}</p>
+        ${renderPrFileLinks(pr)}
+      </details>
+    </li>
+  `).join("");
+}
+
+function renderRecentCommitSummary(summary) {
+  const commits = summary?.recentCommits || [];
+  if (!commits.length) {
+    return `<li class="review-empty">No recent commit metadata was available from GitHub for this repository.</li>`;
+  }
+  return commits.map((commit) => `
+    <li class="summary-item">
+      <div class="summary-item-primary">
+        <div class="merged-pr-head">
+          <a class="source-link merged-pr-title" href="${escapeHtml(commit.url)}" target="_blank" rel="noreferrer">
+            ${escapeHtml(commit.shortSha || "commit")} ${escapeHtml(commit.message)}
+          </a>
+          <span class="file-status">${escapeHtml(commit.filesChanged || 0)} files · ${escapeHtml(formatTime(commit.committedAt))} · ${escapeHtml(commit.author)}</span>
+        </div>
+        ${renderPrPageLinks(commit)}
+      </div>
+      <details class="summary-item-details">
+        <summary>Verification details</summary>
+        <p><strong>Look for:</strong> ${escapeHtml(commit.changedPages?.length ? (commit.inferredPages ? "The inferred production page should reflect this commit's behavior if it shipped there." : "The linked production page should reflect the commit behavior visually.") : "Use the commit link, then inspect the affected app area visually.")}</p>
+        ${renderPrFileLinks(commit)}
+      </details>
+    </li>
+  `).join("");
+}
+
+function renderReviewLinks(summary) {
+  const links = summary?.reviewLinks || {};
+  const items = [
+    ["Merged PR search", links.mergedPullRequestsUrl],
+    ["Commit history", links.commitsUrl],
+    ["Compare manually", links.compareHelpUrl]
+  ].filter(([, href]) => href);
+  if (!items.length) return "";
+  return `
+    <div class="fallback-links" aria-label="Manual GitHub review links">
+      ${items.map(([label, href]) => `
+        <a class="open-link fallback-link" href="${escapeHtml(href)}" target="_blank" rel="noreferrer">${escapeHtml(label)}</a>
+      `).join("")}
+    </div>
+  `;
+}
+
+function renderReviewSection(title, ariaLabel, className, body, options = {}) {
+  if (!body) return "";
+  const meta = options.meta ? `<span>${escapeHtml(options.meta)}</span>` : "";
+  if (options.collapsible) {
+    return `
+      <details class="review-section review-section-collapsible" aria-label="${escapeHtml(ariaLabel)}" ${options.open === false ? "" : "open"}>
+        <summary>
+          <span>${escapeHtml(title)}</span>
+          ${meta}
+        </summary>
+        <ul class="review-list ${escapeHtml(className)}">
+          ${body}
+        </ul>
+      </details>
+    `;
+  }
+  return `
+    <section class="review-section" aria-label="${escapeHtml(ariaLabel)}">
+      <h3>${escapeHtml(title)}</h3>
+      <ul class="review-list ${escapeHtml(className)}">
+        ${body}
+      </ul>
+    </section>
+  `;
+}
+
+function renderFinishedCdRow(row, view) {
+  const summary = row.changeSummary || {};
+  const hasChangedPages = Boolean(summary.changedPages?.length);
+  const hasChangedFiles = Boolean(summary.changedFiles?.length);
+  const hasMergedPrs = Boolean(summary.mergedPullRequests?.length);
+  const hasRecentCommits = Boolean(summary.recentCommits?.length);
+  const status = row.conclusion || "completed";
+  const statusTone = row.failureReason ? "danger" : statusClass(status);
+  const timeDetail = [row.branch, formatTime(row.createdAt)].filter(Boolean).join(" · ");
+  const fileCount = hasChangedFiles || Number(summary.filesChanged || 0) > 0
+    ? `${summary.filesChanged} files`
+    : hasMergedPrs
+    ? `${summary.mergedPullRequests.length} merged PRs`
+    : hasRecentCommits
+    ? `${summary.recentCommits.length} commits`
+    : "manual review links";
+  const delta = [formatSignedCount(summary.additions, "+"), formatSignedCount(summary.deletions, "-")].filter(Boolean).join(" ");
+  const changeLinkLabel = summary.sourceLabel || summary.shortSha || "change unavailable";
+  const commitLink = summary.commitUrl
+    ? `<a class="source-link" href="${escapeHtml(summary.commitUrl)}" target="_blank" rel="noreferrer">${escapeHtml(changeLinkLabel)}</a>`
+    : `<span>${escapeHtml(changeLinkLabel)}</span>`;
+  const changeSourceLabel = summary.source === "compare" ? "Diff" : "Commit";
+  const commitCount = Number(summary.commitCount || 0);
+  const pageSection = hasChangedPages
+    ? renderReviewSection("Changed route sources", "Changed route sources", "page-review-list", renderChangedPages(summary))
+    : "";
+  const fileSection = hasChangedFiles
+    ? renderReviewSection("Source details", "Changed files and review cues", "file-review-list", renderChangedFiles(summary))
+    : "";
+  const mergedPrSection = hasMergedPrs ? renderReviewSection(
+    "Recent merged PR summary",
+    "Recent merged pull requests",
+    "merged-pr-list",
+    renderMergedPrSummary(summary),
+    { collapsible: true, meta: `${summary.mergedPullRequests.length} PRs`, open: false }
+  ) : "";
+  const commitSection = !hasMergedPrs && hasRecentCommits ? renderReviewSection(
+    "Recent commit summary",
+    "Recent commits",
+    "merged-pr-list",
+    renderRecentCommitSummary(summary),
+    { collapsible: true, meta: `${summary.recentCommits.length} commits`, open: false }
+  ) : "";
+  return `
+    <article class="cd-card" style="--accent: var(--${view.color}); --soft: var(--${view.color}-soft);">
+      <div class="cd-card-head row" data-href="${escapeHtml(row.url || "")}">
+        <div class="row-main">
+          <div class="repo">${escapeHtml(row.repo)}</div>
+          <div class="title">${escapeHtml(row.title || row.workflow)}</div>
+        </div>
+        <div class="meta">${escapeHtml(row.workflow)} ${escapeHtml(row.runNumber)}</div>
+        <div class="tag tag-${escapeHtml(statusTone)}">${escapeHtml(status)}</div>
+        <div class="meta">${escapeHtml(timeDetail)}</div>
+        ${row.url ? `<a class="open-link" href="${escapeHtml(row.url)}" target="_blank" rel="noreferrer">Open Run</a>` : ""}
+      </div>
+      <div class="cd-review">
+        <div class="review-summary">
+          <div>
+            <span>Changed</span>
+            <strong>${escapeHtml(fileCount)}${delta ? ` · ${escapeHtml(delta)}` : ""}</strong>
+          </div>
+          <div>
+            <span>${changeSourceLabel}</span>
+            <strong>${commitLink}${commitCount > 1 ? ` · ${escapeHtml(commitCount)} commits` : ""}</strong>
+          </div>
+          <div>
+            <span>Deploy target</span>
+            <strong>${summary.deployUrl ? `<a class="source-link" href="${escapeHtml(summary.deployUrl)}" target="_blank" rel="noreferrer">${escapeHtml(summary.environment || "open app")}</a>` : "not found"}</strong>
+          </div>
+        </div>
+        <p class="review-message"><strong>Change:</strong> ${escapeHtml(summary.message || row.title || row.workflow)}</p>
+        <p class="review-note">${escapeHtml(summary.lookFor || "Open the run and changed files to inspect this deployment.")}</p>
+        ${renderVisualReviewLinks(summary)}
+        ${renderReviewLinks(summary)}
+        ${mergedPrSection}
+        ${commitSection}
+        ${pageSection || fileSection ? `<details class="source-details source-details-block"><summary>Source details</summary>${pageSection}${fileSection}</details>` : ""}
+      </div>
     </article>
   `;
 }

@@ -15,6 +15,7 @@ This project follows [Semantic Versioning](https://semver.org/) where practical.
 - Browser and in-app release notifications include more detail for completed CI/CD work.
 - Security and release-readiness checks now include CI, CodeQL, dependency review, Scorecard, package verification, issue templates, PR templates, CODEOWNERS, and community documentation.
 - Fuzz coverage was added for hardening-sensitive server behavior.
+- Community documentation now includes contributor orientation and support boundaries for open source users.
 
 ### Changed
 
@@ -24,6 +25,7 @@ This project follows [Semantic Versioning](https://semver.org/) where practical.
 - The dashboard UI was tightened for accessibility and operational clarity by simplifying unused controls and improving segmented-control semantics.
 - Repository metadata, package metadata, README, support, security, contributing, maintainer, license, and code of conduct documentation were prepared for public open source release.
 - Changelog maintenance is now part of the contribution workflow, and this changelog has been backfilled with the project changes made so far.
+- Refresh behavior is now driven by GitHub API quota state: low quota pauses refresh, disables the manual refresh button, and waits for the reset window.
 
 ### Fixed
 

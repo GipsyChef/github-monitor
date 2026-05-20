@@ -4,11 +4,18 @@ import { readFileSync } from "node:fs";
 
 import {
   SECURITY_HEADERS,
+  bestProductionUrlCandidate,
+  buildChangeSummary,
   classifyPullRequest,
+  extractProductionUrlsFromText,
   groupPullRequests,
+  isProductionTargetScanPath,
   isAutoMergeCandidate,
   mergeBlockReason,
   openPullRequestSearchQuery,
+  quotaState,
+  recommendRefresh,
+  publicRouteFromFile,
   server
 } from "../server.js";
 
@@ -146,6 +153,290 @@ test("auto merge only targets passing pull requests with reported checks", () =>
 test("open pull request searches exclude archived repositories", () => {
   assert.equal(openPullRequestSearchQuery("owner", "dev"), "is:pr state:open archived:false owner:dev");
   assert.equal(openPullRequestSearchQuery("author", "dev"), "is:pr state:open archived:false author:dev");
+});
+
+test("refresh recommendations pause when GitHub API quota is low", () => {
+  const resetAt = new Date(Date.now() + 18 * 60 * 1000).toISOString();
+  const rateLimit = {
+    tightest: {
+      resource: "core",
+      remaining: 120,
+      limit: 5000,
+      resetAt
+    }
+  };
+
+  const quota = quotaState(rateLimit);
+  assert.equal(quota.status, "low");
+  assert.equal(quota.blocked, true);
+
+  const refresh = recommendRefresh(
+    {
+      runningPrs: 0,
+      runningCd: 0,
+      runningDeployments: 0,
+      busyRunners: 0,
+      failingPrs: 0,
+      failedCd: 0
+    },
+    {
+      mode: "all",
+      includeCd: true,
+      includeRepoRunners: false
+    },
+    rateLimit
+  );
+
+  assert.equal(refresh.quota.blocked, true);
+  assert.equal(refresh.quota.resource, "core");
+  assert.match(refresh.reason, /Paused for core API quota/);
+  assert.ok(new Date(refresh.nextRefreshAt).getTime() >= new Date(resetAt).getTime());
+});
+
+test("production target scan finds deployable URLs in project code", () => {
+  assert.equal(isProductionTargetScanPath("infra/cdk/app-stack.ts"), true);
+  assert.equal(isProductionTargetScanPath("src/components/Button.tsx"), false);
+  assert.deepEqual(
+    extractProductionUrlsFromText("SITE_URL=https://safespendplan.com\nconst docs = 'https://docs.aws.amazon.com/foo'"),
+    ["https://safespendplan.com", "https://docs.aws.amazon.com/foo"]
+  );
+
+  const best = bestProductionUrlCandidate([
+    { url: "https://docs.aws.amazon.com/cloudfront/", source: "infra/README.md" },
+    { url: "https://d111111abcdef8.cloudfront.net", source: "infra/cdk/app-stack.ts" },
+    { url: "safespendplan-market-refresh.json", source: "infra/cdk/outputs.json" },
+    { url: "deploy-frontend-stack.sh", source: "scripts/deploy.sh" },
+    { url: "seo.sitemap", source: "public/sitemap.xml" },
+    { url: "https://$api_domain", source: "scripts/deploy.sh" },
+    { url: "certificate.domainvalidationoptions", source: "infra/cdk/app-stack.ts" },
+    { url: "https://cloudfront.amazonaws.com", source: "infra/README.md" },
+    { url: "https://webemail.local", source: "README.md" },
+    { url: "safespendplan.com", source: "infra/cdk/app-stack.ts" },
+    { url: "http://localhost:3000", source: "README.md" }
+  ], "GipsyChef/safespendplan");
+
+  assert.equal(best.url, "https://safespendplan.com/");
+  assert.equal(best.source, "infra/cdk/app-stack.ts");
+});
+
+test("finished CD change summaries infer reviewable page links and cues", () => {
+  assert.equal(publicRouteFromFile("app/settings/billing/page.tsx"), "/settings/billing");
+  assert.equal(publicRouteFromFile("src/pages/docs/[slug].tsx"), "/docs/:slug");
+  assert.equal(publicRouteFromFile("public/changelog.html"), "/changelog.html");
+  assert.equal(publicRouteFromFile("pages/api/health.ts"), "");
+
+  const summary = buildChangeSummary(
+    "acme/app",
+    {
+      head_sha: "abcdef1234567890",
+      display_title: "ship billing settings"
+    },
+    {
+      sha: "abcdef1234567890",
+      html_url: "https://github.com/acme/app/commit/abcdef1",
+      stats: { additions: 18, deletions: 4 },
+      commit: {
+        message: "Improve billing settings\n\nBody",
+        author: { name: "Dev" }
+      },
+      files: [
+        {
+          filename: "app/settings/billing/page.tsx",
+          status: "modified",
+          additions: 10,
+          deletions: 2,
+          changes: 12,
+          blob_url: "https://github.com/acme/app/blob/abcdef1/app/settings/billing/page.tsx"
+        },
+        {
+          filename: "app/settings/billing/styles.css",
+          status: "modified",
+          additions: 8,
+          deletions: 2,
+          changes: 10,
+          blob_url: "https://github.com/acme/app/blob/abcdef1/app/settings/billing/styles.css"
+        }
+      ]
+    },
+    { url: "https://app.example.com", environment: "production" },
+    {
+      mergedPullRequests: [
+        {
+          pr: {
+            number: 42,
+            title: "Add billing summary",
+            user: { login: "dev" },
+            merged_at: "2026-05-20T10:00:00Z",
+            html_url: "https://github.com/acme/app/pull/42"
+          },
+          files: [
+            {
+              filename: "app/settings/billing/page.tsx",
+              status: "modified",
+              additions: 5,
+              deletions: 1,
+              blob_url: "https://github.com/acme/app/blob/abcdef1/app/settings/billing/page.tsx"
+            }
+          ]
+        }
+      ]
+    }
+  );
+
+  assert.equal(summary.shortSha, "abcdef1");
+  assert.equal(summary.source, "commit");
+  assert.equal(summary.filesChanged, 2);
+  assert.equal(summary.message, "Improve billing settings");
+  assert.equal(summary.changedPages.length, 1);
+  assert.equal(summary.changedPages[0].url, "https://app.example.com/settings/billing");
+  assert.match(summary.changedPages[0].lookFor, /rendered page/);
+  assert.match(summary.changedFiles[1].lookFor, /Visual styling/);
+  assert.equal(summary.mergedPullRequests.length, 1);
+  assert.equal(summary.mergedPullRequests[0].numberLabel, "#42");
+  assert.equal(summary.mergedPullRequests[0].changedPages[0].url, "https://app.example.com/settings/billing");
+
+  const compareSummary = buildChangeSummary(
+    "acme/app",
+    {
+      head_sha: "2222222222222222",
+      display_title: "deploy multiple commits"
+    },
+    {
+      html_url: "https://github.com/acme/app/compare/1111111...2222222",
+      total_commits: 2,
+      commits: [
+        { commit: { message: "First", author: { name: "Dev" } } },
+        { commit: { message: "Second", author: { name: "Dev" } } }
+      ],
+      files: [
+        {
+          filename: "app/page.tsx",
+          status: "modified",
+          additions: 3,
+          deletions: 1,
+          changes: 4,
+          blob_url: "https://github.com/acme/app/blob/2222222/app/page.tsx"
+        }
+      ]
+    },
+    { url: "https://app.example.com" },
+    { source: "compare", baseSha: "1111111111111111" }
+  );
+
+  assert.equal(compareSummary.source, "compare");
+  assert.equal(compareSummary.sourceLabel, "1111111...2222222");
+  assert.equal(compareSummary.commitCount, 2);
+  assert.equal(compareSummary.additions, 3);
+  assert.equal(compareSummary.deletions, 1);
+  assert.match(compareSummary.lookFor, /previous completed CD run/);
+
+  const commitFallback = buildChangeSummary(
+    "acme/app",
+    {
+      display_title: "deploy without diff",
+      head_branch: "main"
+    },
+    null,
+    { url: "https://app.example.com" },
+    {
+      recentCommits: [
+        {
+          sha: "3333333333333333",
+          html_url: "https://github.com/acme/app/commit/3333333",
+          commit: {
+            message: "Ship homepage copy",
+            author: { name: "Dev", date: "2026-05-20T12:00:00Z" }
+          },
+          files: [
+            {
+              filename: "app/page.tsx",
+              status: "modified",
+              additions: 4,
+              deletions: 1,
+              blob_url: "https://github.com/acme/app/blob/3333333/app/page.tsx"
+            }
+          ]
+        }
+      ]
+    }
+  );
+
+  assert.equal(commitFallback.filesChanged, 0);
+  assert.equal(commitFallback.recentCommits.length, 1);
+  assert.equal(commitFallback.recentCommits[0].shortSha, "3333333");
+  assert.equal(commitFallback.recentCommits[0].changedPages[0].url, "https://app.example.com/");
+  assert.equal(commitFallback.reviewLinks.commitsUrl, "https://github.com/acme/app/commits/main");
+  assert.match(commitFallback.lookFor, /recent commit summary/);
+
+  const homepageTarget = buildChangeSummary(
+    "acme/app",
+    {
+      display_title: "homepage deploy",
+      head_branch: "main"
+    },
+    null,
+    { url: "https://prod.example.com", environment: "production" },
+    {
+      mergedPullRequests: [
+        {
+          pr: {
+            number: 7,
+            title: "Change dashboard",
+            user: { login: "dev" },
+            merged_at: "2026-05-20T12:00:00Z",
+            html_url: "https://github.com/acme/app/pull/7"
+          },
+          files: [
+            {
+              filename: "pages/dashboard.tsx",
+              status: "modified",
+              additions: 5,
+              deletions: 1,
+              blob_url: "https://github.com/acme/app/blob/head/pages/dashboard.tsx"
+            }
+          ]
+        }
+      ]
+    }
+  );
+
+  assert.equal(homepageTarget.deployUrl, "https://prod.example.com");
+  assert.equal(homepageTarget.mergedPullRequests[0].changedPages[0].url, "https://prod.example.com/dashboard");
+
+  const inferredTarget = buildChangeSummary(
+    "GipsyChef/safespendplan",
+    {
+      display_title: "deploy security fixes",
+      head_branch: "main"
+    },
+    null,
+    { url: "https://safespendplan.com/", environment: "production" },
+    {
+      mergedPullRequests: [
+        {
+          pr: {
+            number: 118,
+            title: "security: fix forgeable JWT key, magic-link race, plan IDOR",
+            user: { login: "cigan1" },
+            merged_at: "2026-05-20T12:00:00Z",
+            html_url: "https://github.com/GipsyChef/safespendplan/pull/118"
+          },
+          files: [
+            {
+              filename: "src/auth/magic-link.ts",
+              status: "modified",
+              additions: 20,
+              deletions: 4,
+              blob_url: "https://github.com/GipsyChef/safespendplan/blob/head/src/auth/magic-link.ts"
+            }
+          ]
+        }
+      ]
+    }
+  );
+
+  assert.equal(inferredTarget.mergedPullRequests[0].changedPages[0].url, "https://safespendplan.com/login");
+  assert.equal(inferredTarget.mergedPullRequests[0].inferredPages, true);
 });
 
 test("page shell keeps accessible heading and button group semantics", () => {
