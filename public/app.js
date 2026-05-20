@@ -223,6 +223,25 @@ function persist() {
   } catch {}
 }
 
+function isBackendUrl(url) {
+  if (!url) return false;
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    const parts = host.split(".");
+    return parts.some((part) =>
+      part === "api" ||
+      part === "backend" ||
+      part === "srv" ||
+      part.startsWith("api-") ||
+      part.endsWith("-api") ||
+      part.startsWith("backend-") ||
+      part.endsWith("-backend")
+    );
+  } catch {
+    return false;
+  }
+}
+
 function escapeHtml(value) {
   return String(value ?? "")
     .replaceAll("&", "&amp;")
@@ -1137,9 +1156,10 @@ function renderChangedFiles(summary) {
 }
 
 function renderPrPageLinks(pr) {
-  const pages = pr.changedPages || [];
+  let pages = pr.changedPages || [];
+  pages = pages.filter((page) => !page.url || !isBackendUrl(page.url));
   if (!pages.length) {
-    if (!pr.productionUrl) return "";
+    if (!pr.productionUrl || isBackendUrl(pr.productionUrl)) return "";
     const label = pr.productionEnvironment ? `Production site · ${pr.productionEnvironment}` : "Production site";
     return `
       <div class="pr-page-links">
@@ -1184,12 +1204,13 @@ function uniqueVisualPages(summary) {
     ...(summary?.recentCommits || []).flatMap((item) => item.changedPages || [])
   ];
   return groups.filter((page) => {
+    if (page.url && isBackendUrl(page.url)) return false;
     const key = page.url || page.path || page.label;
     if (!key || seen.has(key)) return false;
     seen.add(key);
     return true;
   }).concat(
-    !seen.size && summary?.deployUrl
+    !seen.size && summary?.deployUrl && !isBackendUrl(summary.deployUrl)
       ? [{
           label: "Production site",
           path: "/",
