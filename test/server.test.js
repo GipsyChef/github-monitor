@@ -16,6 +16,7 @@ import {
   quotaState,
   recommendRefresh,
   publicRouteFromFile,
+  isBackendUrl,
   server
 } from "../server.js";
 
@@ -657,4 +658,15 @@ test("dashboard includes running non-CD workflow runs in CI running work", async
     if (previousToken == null) delete process.env.GITHUB_TOKEN;
     else process.env.GITHUB_TOKEN = previousToken;
   }
+});
+
+test("isBackendUrl accurately identifies backend and API subdomains", () => {
+  assert.equal(isBackendUrl("https://api.vectraseo.com"), true);
+  assert.equal(isBackendUrl("https://backend.example.com/billing"), true);
+  assert.equal(isBackendUrl("https://api-prod.someapp.io"), true);
+  assert.equal(isBackendUrl("https://mybackend-prod.com"), false);
+  assert.equal(isBackendUrl("https://app.vectraseo.com/billing"), false);
+  assert.equal(isBackendUrl("https://vectraseo.com"), false);
+  assert.equal(isBackendUrl(""), false);
+  assert.equal(isBackendUrl(null), false);
 });

@@ -643,6 +643,25 @@ function joinUrl(base, route) {
   }
 }
 
+function isBackendUrl(url) {
+  if (!url) return false;
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    const parts = host.split(".");
+    return parts.some((part) =>
+      part === "api" ||
+      part === "backend" ||
+      part === "srv" ||
+      part.startsWith("api-") ||
+      part.endsWith("-api") ||
+      part.startsWith("backend-") ||
+      part.endsWith("-backend")
+    );
+  } catch {
+    return false;
+  }
+}
+
 const PRODUCTION_TLDS = new Set([
   "ai", "app", "au", "biz", "ca", "cc", "cloud", "co", "com", "de", "dev", "digital", "dk",
   "email", "es", "fi", "finance", "fr", "in", "info", "io", "is", "it", "link", "live", "me",
@@ -2242,6 +2261,7 @@ export {
   groupPullRequests,
   isProductionTargetScanPath,
   publicRouteFromFile,
+  isBackendUrl,
   isAutoMergeCandidate,
   mergeBlockReason,
   openPullRequestSearchQuery,
