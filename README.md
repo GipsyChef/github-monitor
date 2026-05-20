@@ -82,6 +82,7 @@ There are currently no runtime npm dependencies beyond Node.js itself; `npm ci` 
 - Busy organization and optional repository-level self-hosted runners
 - GitHub API request count, remaining quota, and reset time
 - Adaptive next-refresh timing based on activity and API quota
+- Quota-aware refresh pausing when GitHub API quota is low, including a disabled manual refresh button until the reset window
 - Browser notifications and an in-app inbox for CI/CD completions and new conflicts
 - Optional auto-merge countdown for passing PRs with completed checks
 
@@ -149,7 +150,7 @@ The server records GitHub rate-limit headers from each REST and GraphQL response
 - Per-resource quota, remaining calls, and reset time
 - A recommended next refresh time
 
-The browser refreshes faster when PR checks, CD actions, deployments, or runners are active. It slows down when the dashboard is quiet, when expensive audit options are enabled, or when GitHub quota gets tight.
+The browser refreshes faster when PR checks, CD actions, deployments, or runners are active. It slows down when the dashboard is quiet, when expensive audit options are enabled, or when GitHub quota gets tight. When quota is low enough that another scan risks exhausting the GitHub API window, the dashboard pauses auto refresh, disables the manual refresh button, and waits until after GitHub's reset time before scanning again.
 
 The notification inbox is kept in localStorage for quick follow-up and prunes entries older than 24 hours.
 
@@ -179,13 +180,19 @@ Use GitHub issues for reproducible bugs and focused feature requests. For suspec
 
 This is a small local utility, so support is best effort. Hosted multi-user deployment support and debugging private repositories without a minimal reproduction are out of scope.
 
+See [SUPPORT.md](SUPPORT.md) for support boundaries and issue details to include.
+
+## Community
+
+New contributors should start with [docs/COMMUNITY.md](docs/COMMUNITY.md). It explains the intended audience, good first contributions, support boundaries, security-sensitive areas, and maintainer expectations.
+
 ## Notes
 
 Draft PRs with no CI checks are hidden. Non-draft PRs with no reported checks and no merge conflicts appear in the No CI view.
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), and [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
+See [CONTRIBUTING.md](CONTRIBUTING.md), [docs/COMMUNITY.md](docs/COMMUNITY.md), [SUPPORT.md](SUPPORT.md), [SECURITY.md](SECURITY.md), and [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
 
 ## License
 

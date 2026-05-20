@@ -40,6 +40,12 @@ Every pull request is expected to pass the required GitHub Actions checks:
 
 OpenSSF Scorecard runs on `main`, on a schedule, and on manual dispatch to track broader supply-chain posture.
 
+## Community And Support
+
+Read [docs/COMMUNITY.md](docs/COMMUNITY.md) before starting larger changes. It describes the project audience, good first contribution areas, support boundaries, and security-sensitive surfaces.
+
+Use [SUPPORT.md](SUPPORT.md) when filing support requests so maintainers have the details needed to reproduce the issue.
+
 ## Contributor License
 
 Contributions are accepted under the inbound-equals-outbound model: by submitting a contribution, you agree to license it under the same MIT License used by this project.
