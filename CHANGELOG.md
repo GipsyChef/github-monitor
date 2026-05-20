@@ -36,6 +36,7 @@ This project follows [Semantic Versioning](https://semver.org/) where practical.
 - Scorecard and code scanning workflows were corrected and gated appropriately for private repository state.
 - Dashboard security headers now apply to API and static responses.
 - CI/CD notification snapshots now account for conflicts and no-CI PRs so completion alerts do not miss visible PR states.
+- Successful merge, close, and auto-merge follow-up actions no longer trigger an immediate status rescan while the dashboard is waiting for its scheduled refresh clock.
 
 ## [1.0.0] - 2026-05-13
 

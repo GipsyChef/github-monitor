@@ -328,7 +328,7 @@ function ensureAutoMergeFollowUp() {
   if (state.autoMergeFollowUpTimer) return;
   state.autoMergeFollowUpTimer = setTimeout(async () => {
     try {
-      await refresh({ source: "auto-merge-status" });
+      await refreshAfterMutation("auto-merge-status");
     } finally {
       state.autoMergeFollowUpTimer = null;
     }
@@ -776,6 +776,33 @@ function scheduleRefreshRetry() {
   state.refreshTimer = setTimeout(() => refresh({ source: "retry" }), delay);
   ensureCountdownTimer();
   renderRefreshStatus();
+}
+
+function scheduledRefreshDelayMs() {
+  if (!state.nextRefreshAt) return 0;
+  const delay = new Date(state.nextRefreshAt).getTime() - Date.now();
+  return Number.isFinite(delay) ? delay : 0;
+}
+
+async function refreshAfterMutation(source) {
+  if (state.loading) return;
+
+  const quotaBlock = quotaRefreshBlock();
+  if (quotaBlock) {
+    state.nextRefreshAt = quotaBlock.retryAt;
+    state.refreshReason = `Paused for ${quotaBlock.resource} API quota`;
+    setError(quotaBlockMessage(quotaBlock), "warning");
+    if (els.autoRefresh.checked) scheduleAutoRefresh(state.data);
+    renderRefreshStatus();
+    return;
+  }
+
+  if (els.autoRefresh.checked && state.refreshTimer && scheduledRefreshDelayMs() > 1000) {
+    renderRefreshStatus();
+    return;
+  }
+
+  await refresh({ source });
 }
 
 function buildParams() {
@@ -1606,7 +1633,7 @@ async function mergePullRequest(button) {
       data.branchDelete?.deleted ? "PR merged" : "PR merged, branch not deleted",
       `${data.pr?.repo || repo} ${data.pr?.numberLabel || `#${number}`}: ${data.pr?.title || title}. ${branchStatus}`
     );
-    await refresh({ source: "merge" });
+    await refreshAfterMutation("merge");
   } catch (error) {
     setError(error.message);
     showToast("Merge failed", error.message);
@@ -1649,7 +1676,7 @@ async function closePullRequest(button) {
       "PR closed",
       `${data.pr?.repo || repo} ${data.pr?.numberLabel || `#${number}`}: ${data.pr?.title || title}.`
     );
-    await refresh({ source: "close" });
+    await refreshAfterMutation("close");
   } catch (error) {
     setError(error.message);
     showToast("Close failed", error.message);
@@ -1693,7 +1720,7 @@ els.autoMerge.addEventListener("change", () => {
   }
   render();
   configureServerAutoMerge()
-    .then(() => refresh({ source: "auto-merge" }))
+    .then(() => refreshAfterMutation("auto-merge"))
     .catch((error) => {
       setError(error.message);
       showToast("Auto merge failed", error.message);
