@@ -595,19 +595,36 @@ function notifyCompletedActions(previousSnapshot, data) {
 
   if (!previousSnapshot.includeCd || !nextSnapshot.includeCd) return;
   const failedCdByKey = new Map((data?.cd?.failed || []).map((row) => [actionKey(row), row]));
+  const finishedCdByKey = new Map((data?.cd?.finished || []).map((row) => [actionKey(row), row]));
   for (const [key, previous] of previousSnapshot.cd) {
     if (nextSnapshot.cd.has(key)) continue;
     const failed = failedCdByKey.get(key);
-    const statusLabel = failed ? `failed (${failed.conclusion})` : "finished";
-    const reason = failed ? `. Reason: ${failureDetail(failed, "CD failed")}` : "";
+    const finished = finishedCdByKey.get(key);
+    const skipped = !failed && finished?.outcome === "skipped";
+    let statusLabel;
+    let reason;
+    let tone;
+    if (failed) {
+      statusLabel = `failed (${failed.conclusion})`;
+      reason = `. Reason: ${failureDetail(failed, "CD failed")}`;
+      tone = "danger";
+    } else if (skipped) {
+      statusLabel = "skipped";
+      reason = ". Production was not deployed.";
+      tone = "warning";
+    } else {
+      statusLabel = "finished";
+      reason = "";
+      tone = "success";
+    }
     sendPopup(
       `CD ${statusLabel}`,
       `${previous.repo} ${previous.workflow} ${previous.runNumber}: ${previous.title || previous.branch}${reason}`,
       `cd:${key}:${statusLabel}`,
       {
-        url: failed?.url || previous.url,
+        url: failed?.url || finished?.url || previous.url,
         kind: "cd",
-        tone: failed ? "danger" : "success"
+        tone
       }
     );
   }
@@ -880,6 +897,24 @@ function updateTabTitle(data) {
 function renderMetrics(data) {
   for (const [key, id] of Object.entries(metricIds)) {
     document.querySelector(`#${id}`).textContent = data.summary[key] ?? 0;
+  }
+  const skippedCd = Number(data.summary.skippedCd || 0);
+  const finishedCdSub = document.querySelector("#metricFinishedCdSub");
+  if (finishedCdSub) {
+    if (skippedCd > 0) {
+      finishedCdSub.textContent = `⊘ ${skippedCd} skipped`;
+      finishedCdSub.setAttribute("aria-label", `${skippedCd} of ${data.summary.finishedCd ?? 0} finished CD runs were skipped — production was not deployed`);
+      finishedCdSub.hidden = false;
+    } else {
+      finishedCdSub.textContent = "";
+      finishedCdSub.removeAttribute("aria-label");
+      finishedCdSub.hidden = true;
+    }
+  }
+  const finishedCdDot = document.querySelector("#navFinishedCdDot");
+  if (finishedCdDot) {
+    finishedCdDot.classList.toggle("amber", skippedCd > 0);
+    finishedCdDot.classList.toggle("green", skippedCd === 0);
   }
   const navCounts = {
     pass: data.summary.passingPrs,
@@ -1341,8 +1376,12 @@ function renderFinishedCdRow(row, view) {
   const hasChangedFiles = Boolean(summary.changedFiles?.length);
   const hasMergedPrs = Boolean(summary.mergedPullRequests?.length);
   const hasRecentCommits = Boolean(summary.recentCommits?.length);
+  const outcome = row.outcome || "";
+  const isSkipped = outcome === "skipped";
   const status = row.conclusion || "completed";
-  const statusTone = row.failureReason ? "danger" : statusClass(status);
+  const statusTone = isSkipped
+    ? "warning"
+    : row.failureReason ? "danger" : statusClass(status);
   const timeDetail = [row.branch, formatTime(row.createdAt)].filter(Boolean).join(" · ");
   const fileCount = hasChangedFiles || Number(summary.filesChanged || 0) > 0
     ? `${summary.filesChanged} files`
@@ -1378,15 +1417,31 @@ function renderFinishedCdRow(row, view) {
     renderRecentCommitSummary(summary),
     { collapsible: true, meta: `${summary.recentCommits.length} commits`, open: false }
   ) : "";
+  const tagLabel = isSkipped
+    ? `<span aria-hidden="true">⊘</span> ${escapeHtml(status)}`
+    : escapeHtml(status);
+  const tagAriaLabel = isSkipped
+    ? "Deploy skipped — production was not updated"
+    : `Run conclusion: ${status}`;
+  const reasonLine = row.skipReason
+    ? `<span class="review-banner-reason">${escapeHtml(row.skipReason)}</span>`
+    : `<span class="review-banner-reason">Skip reason was not derivable from GitHub. Open the run to see the workflow gate that blocked it.</span>`;
+  const noteOrBanner = isSkipped
+    ? `<div class="review-banner review-banner-warning" role="status">
+        <strong>Production was not deployed.</strong>
+        GitHub Actions skipped this workflow run — open the run to see which gate blocked the deploy.
+        ${reasonLine}
+      </div>`
+    : `<p class="review-note">${escapeHtml(summary.lookFor || "Open the run and changed files to inspect this deployment.")}</p>`;
   return `
-    <article class="cd-card" style="--accent: var(--${view.color}); --soft: var(--${view.color}-soft);">
+    <article class="cd-card" data-outcome="${escapeHtml(outcome || "")}" style="--accent: var(--${view.color}); --soft: var(--${view.color}-soft);">
       <div class="cd-card-head row" data-href="${escapeHtml(row.url || "")}">
         <div class="row-main">
           <div class="repo">${escapeHtml(row.repo)}</div>
           <div class="title">${escapeHtml(row.title || row.workflow)}</div>
         </div>
         <div class="meta">${escapeHtml(row.workflow)} ${escapeHtml(row.runNumber)}</div>
-        <div class="tag tag-${escapeHtml(statusTone)}">${escapeHtml(status)}</div>
+        <div class="tag tag-${escapeHtml(statusTone)}" role="status" aria-label="${escapeHtml(tagAriaLabel)}">${tagLabel}</div>
         <div class="meta">${escapeHtml(timeDetail)}</div>
         ${row.url ? `<a class="open-link" href="${escapeHtml(row.url)}" target="_blank" rel="noreferrer">Open Run</a>` : ""}
       </div>
@@ -1406,7 +1461,7 @@ function renderFinishedCdRow(row, view) {
           </div>
         </div>
         <p class="review-message"><strong>Change:</strong> ${escapeHtml(summary.message || row.title || row.workflow)}</p>
-        <p class="review-note">${escapeHtml(summary.lookFor || "Open the run and changed files to inspect this deployment.")}</p>
+        ${noteOrBanner}
         ${renderVisualReviewLinks(summary)}
         ${renderReviewLinks(summary)}
         ${mergedPrSection}

@@ -352,6 +352,34 @@ button.metric.active::before { width: 4px; }
 .metric-ink       { --accent: var(--ink); }
 .metric-gray      { --accent: var(--gray); }
 .metric-conflict  { --accent: var(--red); }
+
+.metric-stack {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 3px;
+  min-height: 30px;
+  min-width: 0;
+}
+
+.metric-sub {
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--muted-strong);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-height: 12px;
+}
+
+.metric-sub[hidden] {
+  visibility: hidden;
+  display: block;
+}
+
+.metric-sub-warning { color: var(--amber); }
 .metric-conflict strong { color: var(--red); }
 .metric-conflict[disabled] strong,
 .metric-conflict strong:empty::before { color: var(--ink); }
@@ -721,6 +749,11 @@ button.metric.active::before { width: 4px; }
   background: var(--red-soft);
   color: var(--red);
 }
+.tag-warning, .tag-skipped {
+  background: var(--amber-soft);
+  color: color-mix(in srgb, var(--amber) 70%, var(--ink));
+  border-color: color-mix(in srgb, var(--amber) 32%, transparent);
+}
 
 .row-actions {
   display: inline-flex;
@@ -820,6 +853,43 @@ button.metric.active::before { width: 4px; }
   background: var(--paper-strong);
   box-shadow: var(--shadow-soft);
   overflow: hidden;
+}
+
+.cd-card[data-outcome="skipped"] {
+  --accent: var(--amber);
+  --soft: var(--amber-soft);
+  border-color: color-mix(in srgb, var(--amber) 22%, var(--line));
+}
+
+.review-banner {
+  margin: 0;
+  padding: 11px 12px 11px 14px;
+  border-radius: var(--radius);
+  border: 1px solid var(--line);
+  background: var(--paper-card);
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+
+.review-banner strong {
+  display: block;
+  font-weight: 800;
+  margin-bottom: 2px;
+}
+
+.review-banner-warning {
+  border-left: 3px solid var(--amber);
+  background: color-mix(in srgb, var(--amber-soft) 55%, var(--paper-card));
+}
+
+.review-banner-reason {
+  display: block;
+  margin-top: 4px;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--muted-strong);
 }
 
 .cd-card-head {
@@ -1536,6 +1606,7 @@ button.metric.active::before { width: 4px; }
 }
 .tone-success .inbox-kind { background: var(--green-soft); color: var(--green); }
 .tone-danger  .inbox-kind { background: var(--red-soft);   color: var(--red); }
+.tone-warning .inbox-kind { background: var(--amber-soft); color: var(--amber); }
 .tone-info    .inbox-kind { background: var(--blue-soft);  color: var(--blue); }
 
 .inbox-body {

@@ -165,6 +165,7 @@ const MERGED_PR_CACHE_TTL_MS = 10 * 60 * 1000;
 const RECENT_COMMIT_CACHE_TTL_MS = 5 * 60 * 1000;
 const RUNNING_RUN_STATUSES = new Set(["queued", "in_progress", "waiting", "requested", "pending"]);
 const FAILED_RUN_CONCLUSIONS = new Set(["failure", "cancelled", "timed_out", "action_required", "startup_failure"]);
+const SKIPPED_RUN_CONCLUSIONS = new Set(["skipped"]);
 const FAILED_JOB_CONCLUSIONS = new Set(["failure", "cancelled", "timed_out", "action_required", "startup_failure"]);
 const FAILED_CHECK_CONCLUSIONS = new Set(["FAILURE", "ERROR", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE"]);
 const RUNNING_DEPLOYMENT_STATES = new Set(["queued", "pending", "in_progress"]);
@@ -600,6 +601,34 @@ function failureReasonFromChecks(checks) {
 
 function cdFailureReason(conclusion) {
   return `Workflow ${failureLabel(conclusion)}`;
+}
+
+function runOutcome(run) {
+  const conclusion = String(run?.conclusion || "").toLowerCase();
+  if (FAILED_RUN_CONCLUSIONS.has(conclusion)) return "failure";
+  if (SKIPPED_RUN_CONCLUSIONS.has(conclusion)) return "skipped";
+  if (conclusion === "success") return "success";
+  if (conclusion === "neutral") return "success";
+  return conclusion || "completed";
+}
+
+async function fetchWorkflowRunSkipReason(repo, run) {
+  if (!run?.id) return "";
+  try {
+    const jobs = await githubRestAll(
+      `/repos/${repo}/actions/runs/${run.id}/jobs`,
+      (json) => json?.jobs || [],
+      100,
+      { filter: "latest" }
+    );
+    if (!jobs.length) return "";
+    const skippedJobs = [...new Set(jobs.filter((job) => String(job.conclusion || "").toLowerCase() === "skipped").map((job) => job.name || "unnamed job"))];
+    if (!skippedJobs.length) return "";
+    const suffix = skippedJobs.length > 3 ? `, +${skippedJobs.length - 3} more` : "";
+    return `Skipped jobs: ${skippedJobs.slice(0, 3).join(", ")}${suffix}`;
+  } catch {
+    return "";
+  }
 }
 
 function shortSha(value) {
@@ -1537,10 +1566,14 @@ async function fetchCdForRepo(repo) {
       for (const [runIndex, run] of completedRuns.entries()) {
         const finishedAt = run.updated_at || run.created_at;
         if (!isWithinFinishedCdWindow(finishedAt)) continue;
+        const outcome = runOutcome(run);
         const failureReason = FAILED_RUN_CONCLUSIONS.has(run.conclusion)
           ? failureReasons.get(run.id) || await fetchWorkflowRunFailureReason(repo, run)
           : "";
         if (failureReason) failureReasons.set(run.id, failureReason);
+        const skipReason = outcome === "skipped"
+          ? await fetchWorkflowRunSkipReason(repo, run)
+          : "";
         deploymentTargetsPromise ||= fetchRecentDeploymentTargets(repo);
         const deploymentTargets = await deploymentTargetsPromise;
         let deployTarget = deploymentTargets.get(run.head_branch || "") || deploymentTargets.get("") || {};
@@ -1569,7 +1602,9 @@ async function fetchCdForRepo(repo) {
           workflow: workflow.name,
           runNumber: `#${run.run_number}`,
           conclusion: run.conclusion || "",
+          outcome,
           failureReason,
+          skipReason,
           branch: run.head_branch || "",
           title: run.display_title || "",
           url: run.html_url || "",
@@ -1778,6 +1813,7 @@ async function buildDashboardData(requestUrl) {
     conflictPrs: prGroups.conflicts.length,
     runningCd: runningCd.length,
     finishedCd: finishedCd.length,
+    skippedCd: finishedCd.filter((row) => row.outcome === "skipped").length,
     runningDeployments: runningDeployments.length,
     busyRunners: busyRunners.length,
     failedCd: failedCd.length
@@ -2267,5 +2303,6 @@ export {
   openPullRequestSearchQuery,
   quotaState,
   recommendRefresh,
+  runOutcome,
   server
 };

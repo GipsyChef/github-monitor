@@ -146,7 +146,10 @@
             <strong id="metricCd">0</strong>
           </button>
           <button class="metric metric-green" type="button" data-view="finishedCd" aria-label="Show finished CD">
-            <span class="metric-label">Finished CD</span>
+            <span class="metric-stack">
+              <span class="metric-label">Finished CD</span>
+              <span class="metric-sub metric-sub-warning" id="metricFinishedCdSub" hidden></span>
+            </span>
             <strong id="metricFinishedCd">0</strong>
           </button>
           <button class="metric metric-ink" type="button" data-view="failedCd" aria-label="Show failed CD">
@@ -199,7 +202,7 @@
               <strong id="navRunningCd">0</strong>
             </button>
             <button class="rail-item" type="button" data-view="finishedCd">
-              <span class="dot green"></span>
+              <span id="navFinishedCdDot" class="dot green"></span>
               Finished CD
               <strong id="navFinishedCd">0</strong>
             </button>
