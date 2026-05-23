@@ -19,6 +19,16 @@ Include:
 
 ## Security Model
 
-GitHub Monitor is intended to run on a trusted local machine and binds to `127.0.0.1` by default. It uses the caller's GitHub token for API reads and for merge requests initiated from the dashboard. Treat the local dashboard as privileged when using a token that can merge pull requests.
+GitHub Monitor is intended to run on a trusted local machine and binds to `127.0.0.1` by default. It authenticates to GitHub with either a personal access token (PAT) read from `GITHUB_TOKEN` / `GH_TOKEN` / `gh auth token`, or with installation tokens minted from a GitHub App you control. Both paths are used for API reads and for merge or close actions initiated from the dashboard. Treat the local dashboard as privileged whenever the active credential can merge or close pull requests.
 
 Do not expose the server directly to an untrusted network.
+
+## GitHub App private keys
+
+When the GitHub App auth mode is enabled (`GITHUB_APP_ID` and `GITHUB_APP_PRIVATE_KEY_PATH` both set):
+
+- Store the `.pem` private key outside this repository. The recommended location is `~/.config/github-monitor/github-app-private-key.pem`.
+- Set the file mode to `0600`. The server warns at startup if the key is readable by group or others.
+- Do not paste private key contents into shell environment variables; use the file path mechanism. PEM bodies have literal newlines that are easy to leak through shell history, process listings, and CI logs.
+- The repository `.gitignore` excludes `*.pem` files. Do not move the key into the working tree even temporarily.
+- Rotate the key on a schedule and immediately if you suspect exposure. Setup and rotation steps are documented in [docs/github-app-setup.md](docs/github-app-setup.md). Audit usage in the App's settings and your repositories' security log when investigating a suspected leak.

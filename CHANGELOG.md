@@ -8,6 +8,7 @@ This project follows [Semantic Versioning](https://semver.org/) where practical.
 
 ### Added
 
+- GitHub App authentication is now supported alongside the existing PAT path. When `GITHUB_APP_ID` and `GITHUB_APP_PRIVATE_KEY_PATH` are both set, the server signs a short-lived JWT, discovers installations, and mints per-installation access tokens that route requests by owner. PAT auth remains the default when those variables are absent. Setup, permission scoping, private-key handling, and rate-limit trade-offs are documented in `docs/github-app-setup.md`.
 - GitHub REST GET requests now reuse ETag-based conditional caching: subsequent scans send `If-None-Match` and a 304 response is served from memory without consuming the primary rate limit. Warm dashboard refreshes now spend close to zero quota points where they previously spent dozens.
 - Server-managed auto merge now monitors eligible passing PRs in the selected scope, keeps the countdown active without relying on the browser tab, and exposes `/api/auto-merge`.
 - No-CI pull requests now appear in a dedicated view when they are non-draft, conflict-free, and reported as mergeable by GitHub.

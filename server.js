@@ -1,8 +1,10 @@
 import http from "node:http";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { spawn } from "node:child_process";
-import { readFile } from "node:fs/promises";
+import { createSign } from "node:crypto";
+import { readFile, stat } from "node:fs/promises";
 import { extname, join, normalize } from "node:path";
+import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 
 const isMain = process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];
@@ -11,6 +13,9 @@ const publicDir = join(__dirname, "public");
 const port = Number(process.env.PORT || 4177);
 const githubApiBase = "https://api.github.com";
 const githubGraphqlUrl = "https://api.github.com/graphql";
+const GITHUB_APP_ID = process.env.GITHUB_APP_ID || "";
+const GITHUB_APP_PRIVATE_KEY_PATH = process.env.GITHUB_APP_PRIVATE_KEY_PATH || "";
+const APP_AUTH_ENABLED = Boolean(GITHUB_APP_ID && GITHUB_APP_PRIVATE_KEY_PATH);
 let githubTokenPromise;
 const scanMetrics = new AsyncLocalStorage();
 const SECURITY_HEADERS = {
@@ -246,7 +251,7 @@ function run(command, args, { timeoutMs = 120000 } = {}) {
   });
 }
 
-async function getGitHubToken() {
+async function getPatToken() {
   if (!githubTokenPromise) {
     githubTokenPromise = (async () => {
       const envToken = process.env.GITHUB_TOKEN || process.env.GH_TOKEN;
@@ -259,6 +264,161 @@ async function getGitHubToken() {
     })();
   }
   return githubTokenPromise;
+}
+
+async function getGitHubToken({ ownerHint = null } = {}) {
+  if (APP_AUTH_ENABLED) {
+    return getInstallationToken(ownerHint);
+  }
+  return getPatToken();
+}
+
+function extractOwnerFromPath(path) {
+  if (!path) return null;
+  let pathname = path;
+  if (path.startsWith("http")) {
+    try {
+      const u = new URL(path);
+      if (u.host !== "api.github.com") return null;
+      pathname = u.pathname;
+    } catch {
+      return null;
+    }
+  }
+  const parts = pathname.replace(/^\/+/, "").split("/").filter(Boolean);
+  if (parts.length < 2) return null;
+  const [first, second] = parts;
+  if (first === "repos" || first === "orgs" || first === "users") {
+    return second;
+  }
+  return null;
+}
+
+function buildAppJwtPayload(appId, nowSeconds) {
+  return {
+    iat: nowSeconds - 60,
+    exp: nowSeconds + 540,
+    iss: String(appId)
+  };
+}
+
+function signAppJwt({ appId, privateKey, nowSeconds }) {
+  const header = { alg: "RS256", typ: "JWT" };
+  const payload = buildAppJwtPayload(appId, nowSeconds);
+  const encodedHeader = Buffer.from(JSON.stringify(header)).toString("base64url");
+  const encodedPayload = Buffer.from(JSON.stringify(payload)).toString("base64url");
+  const signingInput = `${encodedHeader}.${encodedPayload}`;
+  const signer = createSign("RSA-SHA256");
+  signer.update(signingInput);
+  const signature = signer.sign(privateKey, "base64url");
+  return `${signingInput}.${signature}`;
+}
+
+function installationTokenIsValid(entry, nowSeconds) {
+  return Boolean(entry && entry.expiresAt - 90 > nowSeconds);
+}
+
+function expandHomePath(path) {
+  if (!path) return path;
+  if (path === "~") return homedir();
+  if (path.startsWith("~/")) return join(homedir(), path.slice(2));
+  return path;
+}
+
+let cachedAppJwt = null;
+let cachedPrivateKey = null;
+let installationsByOwner = null;
+const installationTokensByOwner = new Map();
+
+async function loadAppPrivateKey() {
+  if (cachedPrivateKey) return cachedPrivateKey;
+  const resolvedPath = expandHomePath(GITHUB_APP_PRIVATE_KEY_PATH);
+  try {
+    const stats = await stat(resolvedPath);
+    if ((stats.mode & 0o077) !== 0) {
+      console.warn(`[github-monitor] private key at ${resolvedPath} is readable by group/others; run: chmod 600 ${resolvedPath}`);
+    }
+  } catch (error) {
+    throw new Error(`GitHub App private key not found at ${resolvedPath}: ${error.message}`);
+  }
+  cachedPrivateKey = await readFile(resolvedPath, "utf8");
+  return cachedPrivateKey;
+}
+
+async function getAppJwt() {
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  if (cachedAppJwt && cachedAppJwt.expiresAt - 30 > nowSeconds) {
+    return cachedAppJwt.token;
+  }
+  const privateKey = await loadAppPrivateKey();
+  const token = signAppJwt({ appId: GITHUB_APP_ID, privateKey, nowSeconds });
+  cachedAppJwt = { token, expiresAt: nowSeconds + 540 };
+  return token;
+}
+
+async function appAuthorizedRequest(url, init = {}) {
+  const jwt = await getAppJwt();
+  const response = await fetch(url, {
+    ...init,
+    headers: {
+      accept: "application/vnd.github+json",
+      authorization: `Bearer ${jwt}`,
+      "user-agent": "github-monitor-local",
+      "x-github-api-version": "2022-11-28",
+      ...(init.headers || {})
+    }
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`GitHub App request to ${url} failed (${response.status}): ${text}`);
+  }
+  return response.json();
+}
+
+async function discoverInstallations() {
+  if (installationsByOwner) return installationsByOwner;
+  const installations = await appAuthorizedRequest(`${githubApiBase}/app/installations?per_page=100`);
+  const map = new Map();
+  for (const inst of installations) {
+    const owner = inst.account?.login;
+    if (!owner) continue;
+    map.set(owner.toLowerCase(), {
+      installationId: inst.id,
+      accountLogin: owner,
+      accountType: inst.account.type
+    });
+  }
+  installationsByOwner = map;
+  return map;
+}
+
+async function mintInstallationToken(installationId) {
+  const data = await appAuthorizedRequest(
+    `${githubApiBase}/app/installations/${installationId}/access_tokens`,
+    { method: "POST" }
+  );
+  return {
+    token: data.token,
+    expiresAt: Math.floor(new Date(data.expires_at).getTime() / 1000)
+  };
+}
+
+async function getInstallationToken(ownerHint) {
+  const installations = await discoverInstallations();
+  if (installations.size === 0) {
+    throw new Error("GitHub App has no installations. Install the app on at least one account.");
+  }
+  const lookupKey = ownerHint ? String(ownerHint).toLowerCase() : null;
+  const installation = (lookupKey && installations.get(lookupKey)) || installations.values().next().value;
+  const cacheKey = installation.accountLogin.toLowerCase();
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  const cached = installationTokensByOwner.get(cacheKey);
+  if (installationTokenIsValid(cached, nowSeconds)) {
+    return cached.token;
+  }
+  const minted = await mintInstallationToken(installation.installationId);
+  installationTokensByOwner.set(cacheKey, minted);
+  return minted.token;
 }
 
 function githubUrl(path, query = {}) {
@@ -305,8 +465,9 @@ function storeConditionalResponse(store, url, method, response, body) {
   return true;
 }
 
-async function githubRequest(path, { method = "GET", query = {}, body } = {}) {
-  const token = await getGitHubToken();
+async function githubRequest(path, { method = "GET", query = {}, body, ownerHint } = {}) {
+  const effectiveOwnerHint = ownerHint || extractOwnerFromPath(path);
+  const token = await getGitHubToken({ ownerHint: effectiveOwnerHint });
   const url = githubUrl(path, query);
   const cacheKey = url.toString();
   const baseHeaders = {
@@ -530,14 +691,14 @@ async function githubGraphql(query, variables) {
   return json;
 }
 
-async function githubRestPage(path, page, perPage = 100, query = {}) {
-  return githubRequest(path, { query: { ...query, per_page: perPage, page } });
+async function githubRestPage(path, page, perPage = 100, query = {}, ownerHint) {
+  return githubRequest(path, { query: { ...query, per_page: perPage, page }, ownerHint });
 }
 
-async function githubRestAll(path, pickItems, perPage = 100, query = {}) {
+async function githubRestAll(path, pickItems, perPage = 100, query = {}, ownerHint) {
   const results = [];
   for (let page = 1; page <= 50; page += 1) {
-    const json = await githubRestPage(path, page, perPage, query);
+    const json = await githubRestPage(path, page, perPage, query, ownerHint);
     const items = pickItems(json);
     if (!items.length) break;
     results.push(...items);
@@ -1250,12 +1411,24 @@ async function fetchPullRequestByNumber(repo, number) {
 }
 
 async function getAccount() {
+  if (APP_AUTH_ENABLED) {
+    const installations = await discoverInstallations();
+    const first = installations.values().next().value;
+    if (!first) {
+      throw new Error("GitHub App has no installations. Install the app on at least one account.");
+    }
+    return first.accountLogin;
+  }
   const user = await githubRequest("/user");
   return user.login;
 }
 
 async function allOwners(me) {
   return cachedGithubValue(`owners:${me}`, OWNER_REPOS_CACHE_TTL_MS, async () => {
+    if (APP_AUTH_ENABLED) {
+      const installations = await discoverInstallations();
+      return Array.from(installations.values()).map((inst) => inst.accountLogin);
+    }
     const orgs = await githubRestAll("/user/orgs", (json) => (Array.isArray(json) ? json : []));
     return [me, ...orgs.map((org) => org.login).filter(Boolean)];
   });
@@ -1281,6 +1454,21 @@ async function fetchPullRequests({ mode, me, jobs }) {
 
 async function fetchOwnerRepos(owner, me) {
   return cachedGithubValue(`owner-repos:${owner}:${me}`, OWNER_REPOS_CACHE_TTL_MS, async () => {
+    if (APP_AUTH_ENABLED) {
+      const installations = await discoverInstallations();
+      const installation = installations.get(owner.toLowerCase());
+      if (!installation) return [];
+      const repos = await githubRestAll(
+        "/installation/repositories",
+        (json) => json?.repositories || [],
+        100,
+        {},
+        owner
+      );
+      return repos
+        .filter((repo) => !repo.archived && repo.owner?.login?.toLowerCase() === owner.toLowerCase())
+        .map((repo) => repo.full_name);
+    }
     if (owner === me) {
       const repos = await githubRestAll("/user/repos", (json) => (Array.isArray(json) ? json : []), 100, {
         affiliation: "owner"
@@ -2366,6 +2554,7 @@ const server = http.createServer(async (req, res) => {
 if (isMain) {
   server.listen(port, "127.0.0.1", () => {
     console.log(`GitHub Monitor dashboard: http://127.0.0.1:${port}`);
+    console.log(`Auth mode: ${APP_AUTH_ENABLED ? `GitHub App (id ${GITHUB_APP_ID})` : "Personal access token"}`);
   });
 }
 
@@ -2390,5 +2579,9 @@ export {
   applyConditionalHeaders,
   takeCachedConditionalResponse,
   storeConditionalResponse,
+  extractOwnerFromPath,
+  buildAppJwtPayload,
+  signAppJwt,
+  installationTokenIsValid,
   server
 };
