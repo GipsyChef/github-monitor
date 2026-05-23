@@ -153,6 +153,7 @@ The server records GitHub rate-limit headers from each REST and GraphQL response
 
 - GitHub requests used by the scan
 - Per-resource quota, remaining calls, and reset time
+- Under GitHub App auth: one bucket per installation, since each installation has its own independent quota. The chip in the footer shows the *tightest* bucket (lowest remaining-to-limit ratio) — the one that would throttle first — and notes how many other buckets exist; hover the chip for the full per-installation breakdown.
 - A recommended next refresh time
 
 The browser refreshes faster when PR checks, CD actions, deployments, or runners are active. It slows down when the dashboard is quiet, when expensive audit options are enabled, or when GitHub quota gets tight. When quota is low enough that another scan risks exhausting the GitHub API window, the dashboard pauses auto refresh, disables the manual refresh button, and waits until after GitHub's reset time before scanning again.

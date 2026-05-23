@@ -111,7 +111,16 @@ If you instead see `Auth mode: Personal access token`, one of the two environmen
 
 Open the dashboard. The footer chip near the API quota indicator (`core: 1487/5000 · watch · resets …`) will reflect the installation's limit. For an organization with 20+ users installed on 20+ repos, the `limit` portion should be `12500`. For smaller installations it stays at `5000` plus the small boosts described above.
 
-Each installation has its own bucket. If the App is installed on multiple accounts, the dashboard reports the bucket of the request that triggered the most recent rate-limit header — not the sum.
+### Reading the chip with multiple installations
+
+Each installation has its own bucket; buckets are independent and do not pool. When the App is installed on more than one account, the chip shows two pieces of information:
+
+- The **tightest bucket** as the headline number — the bucket with the lowest `remaining/limit` ratio. This is what would throttle the dashboard first if quota ran out, so it is what you want to see at a glance.
+- A `+N bucket(s)` suffix indicating how many other buckets have been observed during this server run.
+
+Hover the chip to see the per-bucket breakdown (account login, used/limit, reset time) and the total observed capacity across all buckets. The chip will not sum buckets into a single headline number, because hitting zero in any one bucket throttles requests routed to that account regardless of what other buckets have left.
+
+Buckets are discovered incrementally as the server makes requests against each installation, so the count may grow over the first few scans before stabilising.
 
 ## Limitations of the App mode
 

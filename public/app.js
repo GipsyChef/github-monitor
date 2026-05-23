@@ -729,7 +729,7 @@ function quotaBlockMessage(block) {
   return `${block.resource} API quota is low${quota}. Refresh is paused until ${formatTime(block.retryAt)}.`;
 }
 
-function rateLimitTooltip(tightest, quotaState, quotaBlock) {
+function rateLimitTooltip(tightest, quotaState, quotaBlock, rateLimit) {
   if (!tightest) {
     return "GitHub API quota is not available until the first scan finishes.";
   }
@@ -737,14 +737,44 @@ function rateLimitTooltip(tightest, quotaState, quotaBlock) {
   const remaining = tightest.remaining ?? "?";
   const limit = tightest.limit ?? "?";
   const reset = formatTime(tightest.resetAt);
-  const base = `${resource} is the GitHub API quota bucket used by this scan. ${remaining} of ${limit} requests remain until it resets at ${reset}.`;
+  const buckets = Array.isArray(rateLimit?.buckets) ? rateLimit.buckets : [];
+  const installationCount = new Set(
+    buckets.map((b) => b.installationKey).filter((key) => key && key !== "pat")
+  ).size;
+  const multiBucket = installationCount > 1;
+
+  const labelBucket = (b) =>
+    b.installationKey && b.installationKey !== "pat"
+      ? `${b.installationKey} (${b.resource}) — ${b.remaining}/${b.limit}, resets ${formatTime(b.resetAt)}`
+      : `${b.resource} — ${b.remaining}/${b.limit}, resets ${formatTime(b.resetAt)}`;
+
+  let body;
+  if (multiBucket) {
+    const headerScope = `${resource} on ${tightest.installationKey} is the tightest of ${buckets.length} quota buckets across ${installationCount} GitHub App installations observed so far`;
+    body = `${headerScope}. This bucket: ${labelBucket(tightest)}.`;
+    const others = buckets
+      .filter((b) => !(b.installationKey === tightest.installationKey && b.resource === tightest.resource))
+      .slice(0, 5);
+    if (others.length) {
+      const lines = others.map((b) => `  ${labelBucket(b)}`);
+      body += `\n\nOther buckets:\n${lines.join("\n")}`;
+      const hidden = buckets.length - 1 - others.length;
+      if (hidden > 0) body += `\n  …and ${hidden} more`;
+    }
+    const totalRemaining = buckets.reduce((sum, b) => sum + (Number(b.remaining) || 0), 0);
+    const totalLimit = buckets.reduce((sum, b) => sum + (Number(b.limit) || 0), 0);
+    body += `\n\nEach installation has its own quota. The chip shows the bucket closest to depletion because that's what throttles first. Total observed capacity: ${totalRemaining}/${totalLimit}.`;
+  } else {
+    body = `${resource} is the GitHub API quota bucket used by this scan. ${remaining} of ${limit} requests remain until it resets at ${reset}.`;
+  }
+
   if (quotaBlock) {
-    return `${base} Low means another scan could exhaust the bucket, so refresh is paused until after the reset window.`;
+    return `${body} Low means another scan could exhaust the bucket, so refresh is paused until after the reset window.`;
   }
   if (quotaState === "watch") {
-    return `${base} Watch means quota is getting tight, so the dashboard slows refreshes.`;
+    return `${body} Watch means quota is getting tight, so the dashboard slows refreshes.`;
   }
-  return `${base} The dashboard adjusts refresh timing from this quota.`;
+  return `${body} The dashboard adjusts refresh timing from this quota.`;
 }
 
 function renderRefreshStatus() {
@@ -762,8 +792,15 @@ function renderRefreshStatus() {
 
   if (tightest) {
     const quotaState = quotaBlock ? "low" : data?.refresh?.quota?.status === "watch" ? "watch" : "";
-    els.rateLimit.textContent = `${tightest.resource}: ${tightest.remaining}/${tightest.limit}${quotaState ? ` · ${quotaState}` : ""} · resets ${formatTime(tightest.resetAt)}`;
-    const tooltip = rateLimitTooltip(tightest, quotaState, quotaBlock);
+    const buckets = Array.isArray(data?.rateLimit?.buckets) ? data.rateLimit.buckets : [];
+    const installationCount = new Set(
+      buckets.map((b) => b.installationKey).filter((key) => key && key !== "pat")
+    ).size;
+    const bucketSuffix = installationCount > 1
+      ? ` · +${buckets.length - 1} bucket${buckets.length - 1 === 1 ? "" : "s"}`
+      : "";
+    els.rateLimit.textContent = `${tightest.resource}: ${tightest.remaining}/${tightest.limit}${quotaState ? ` · ${quotaState}` : ""} · resets ${formatTime(tightest.resetAt)}${bucketSuffix}`;
+    const tooltip = rateLimitTooltip(tightest, quotaState, quotaBlock, data?.rateLimit);
     els.rateLimit.title = tooltip;
     els.rateLimit.setAttribute("aria-label", tooltip);
   } else if (data?.rateLimit) {

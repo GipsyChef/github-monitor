@@ -8,6 +8,7 @@ This project follows [Semantic Versioning](https://semver.org/) where practical.
 
 ### Added
 
+- The footer rate-limit chip now tracks each GitHub App installation as an independent bucket. The headline number is the *tightest* bucket (lowest remaining-to-limit ratio) across all observed installations and resources — the one that would throttle first — and a `+N bucket(s)` suffix indicates additional buckets exist. Hover the chip for the full per-installation breakdown (account, used/limit, reset time) and the total observed capacity. PAT mode shows a single bucket as before.
 - GitHub App authentication is now supported alongside the existing PAT path. When `GITHUB_APP_ID` and `GITHUB_APP_PRIVATE_KEY_PATH` are both set, the server signs a short-lived JWT, discovers installations, and mints per-installation access tokens that route requests by owner. PAT auth remains the default when those variables are absent. Setup, permission scoping, private-key handling, and rate-limit trade-offs are documented in `docs/github-app-setup.md`.
 - GitHub REST GET requests now reuse ETag-based conditional caching: subsequent scans send `If-None-Match` and a 304 response is served from memory without consuming the primary rate limit. Warm dashboard refreshes now spend close to zero quota points where they previously spent dozens.
 - Server-managed auto merge now monitors eligible passing PRs in the selected scope, keeps the countdown active without relying on the browser tab, and exposes `/api/auto-merge`.
