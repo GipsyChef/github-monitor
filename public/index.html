@@ -153,7 +153,10 @@
             <strong id="metricFinishedCd">0</strong>
           </button>
           <button class="metric metric-ink" type="button" data-view="failedCd" aria-label="Show failed CD">
-            <span class="metric-label">Failed CD</span>
+            <span class="metric-stack">
+              <span class="metric-label">Failed CD</span>
+              <span class="metric-sub metric-sub-danger" id="metricFailedCdSub" hidden></span>
+            </span>
             <strong id="metricFailedCd">0</strong>
           </button>
           <div class="metric metric-gray" aria-label="Repositories in scope">
@@ -217,7 +220,7 @@
               <strong id="navRunners">0</strong>
             </button>
             <button class="rail-item" type="button" data-view="failedCd">
-              <span class="dot ink"></span>
+              <span id="navFailedCdDot" class="dot ink"></span>
               Failed CD
               <strong id="navFailedCd">0</strong>
             </button>

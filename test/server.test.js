@@ -18,6 +18,8 @@ import {
   publicRouteFromFile,
   isBackendUrl,
   runOutcome,
+  selectFailedCdRuns,
+  findSupersedingSuccessfulRun,
   server
 } from "../server.js";
 
@@ -678,6 +680,79 @@ test("dashboard scoreboard surfaces skipped CD runs without a new lane", () => {
   assert.match(indexHtml, /id="metricFinishedCdSub"/);
   assert.match(indexHtml, /id="navFinishedCdDot"/);
   assert.match(indexHtml, /class="metric metric-green"[\s\S]*?id="metricFinishedCdSub"/);
+});
+
+test("dashboard scoreboard exposes a Failed CD subtitle and dot for still-failing vs resolved", () => {
+  assert.match(indexHtml, /id="metricFailedCdSub"/);
+  assert.match(indexHtml, /id="navFailedCdDot"/);
+  assert.match(indexHtml, /class="metric metric-ink"[\s\S]*?id="metricFailedCdSub"/);
+});
+
+test("failed CD runs are surfaced even when a newer completed run displaces the latest entry", () => {
+  // Regression: a CD workflow that fails, then has a follow-up run (success/skipped/etc.) was
+  // dropping out of the Failed CD list because the categorization only looked at the latest
+  // completed run per workflow. The failure still appears in Finished CD as FAILURE, so the
+  // counts were inconsistent (Finished CD shows the FAILURE row but Failed CD shows 0).
+  const now = Date.parse("2026-05-23T19:25:00Z");
+  const minutesAgo = (mins) => new Date(now - mins * 60 * 1000).toISOString();
+  const daysAgo = (days) => new Date(now - days * 24 * 60 * 60 * 1000).toISOString();
+  const runs = [
+    { id: 6, status: "in_progress", conclusion: null, updated_at: minutesAgo(1) },
+    { id: 5, status: "completed", conclusion: "success", updated_at: minutesAgo(2) },
+    { id: 4, status: "completed", conclusion: "skipped", updated_at: minutesAgo(15) },
+    { id: 3, status: "completed", conclusion: "failure", updated_at: minutesAgo(30) },
+    { id: 2, status: "completed", conclusion: "cancelled", updated_at: minutesAgo(120) },
+    { id: 1, status: "completed", conclusion: "failure", updated_at: daysAgo(8) }
+  ];
+
+  const failed = selectFailedCdRuns(runs, { now });
+  assert.deepEqual(failed.map((run) => run.id), [3, 2]);
+});
+
+test("findSupersedingSuccessfulRun marks a failure as resolved only when a newer success exists", () => {
+  // completedRuns are newest-first (GitHub Actions API order).
+  const succ414 = { id: 414, run_number: 414, conclusion: "success", html_url: "https://example/414" };
+  const succ413 = { id: 413, run_number: 413, conclusion: "neutral", html_url: "https://example/413" };
+  const skip413 = { id: 4131, run_number: 413, conclusion: "skipped", html_url: "https://example/413s" };
+  const fail412 = { id: 412, run_number: 412, conclusion: "failure", html_url: "https://example/412" };
+  const fail411 = { id: 411, run_number: 411, conclusion: "failure", html_url: "https://example/411" };
+
+  // Newer success → resolved.
+  assert.equal(
+    findSupersedingSuccessfulRun([succ414, fail412, fail411], fail412),
+    succ414
+  );
+  // Neutral counts as success (matches runOutcome).
+  assert.equal(
+    findSupersedingSuccessfulRun([succ413, fail412], fail412),
+    succ413
+  );
+  // Newer skipped does NOT resolve a failure (production was not deployed).
+  assert.equal(findSupersedingSuccessfulRun([skip413, fail412], fail412), null);
+  // Newer failure does not resolve.
+  assert.equal(findSupersedingSuccessfulRun([fail411, fail412], fail412), null);
+  // Newest position → nothing newer → null.
+  assert.equal(findSupersedingSuccessfulRun([fail412, fail411], fail412), null);
+  // Failed run not present → null (no spurious match).
+  assert.equal(findSupersedingSuccessfulRun([succ414, fail411], fail412), null);
+  // Returns the first newer success even when an intervening run also failed.
+  assert.equal(
+    findSupersedingSuccessfulRun([succ414, fail411, fail412], fail412),
+    succ414
+  );
+});
+
+test("selectFailedCdRuns ignores non-completed runs and unknown timestamps", () => {
+  const now = Date.parse("2026-05-23T19:25:00Z");
+  const runs = [
+    { id: 1, status: "queued", conclusion: null, updated_at: new Date(now).toISOString() },
+    { id: 2, status: "completed", conclusion: "failure", updated_at: "not-a-date" },
+    { id: 3, status: "completed", conclusion: "success", updated_at: new Date(now).toISOString() },
+    { id: 4, status: "completed", conclusion: "failure", created_at: new Date(now - 1000).toISOString() }
+  ];
+
+  const failed = selectFailedCdRuns(runs, { now });
+  assert.deepEqual(failed.map((run) => run.id), [4]);
 });
 
 test("isBackendUrl accurately identifies backend and API subdomains", () => {

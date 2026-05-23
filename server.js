@@ -551,9 +551,28 @@ function parsePullNumber(value) {
   return number;
 }
 
-function isWithinFailedCdWindow(value) {
+function isWithinFailedCdWindow(value, now = Date.now()) {
   const time = new Date(value).getTime();
-  return Number.isFinite(time) && Date.now() - time <= FAILED_CD_MAX_AGE_MS;
+  return Number.isFinite(time) && now - time <= FAILED_CD_MAX_AGE_MS;
+}
+
+function selectFailedCdRuns(runs, { now = Date.now() } = {}) {
+  if (!Array.isArray(runs)) return [];
+  return runs.filter((run) => {
+    if (!run || run.status !== "completed") return false;
+    if (!FAILED_RUN_CONCLUSIONS.has(run.conclusion)) return false;
+    return isWithinFailedCdWindow(run.updated_at || run.created_at, now);
+  });
+}
+
+function findSupersedingSuccessfulRun(completedRunsNewestFirst, failedRun) {
+  if (!Array.isArray(completedRunsNewestFirst) || !failedRun) return null;
+  const idx = completedRunsNewestFirst.indexOf(failedRun);
+  if (idx <= 0) return null;
+  for (let i = idx - 1; i >= 0; i--) {
+    if (runOutcome(completedRunsNewestFirst[i]) === "success") return completedRunsNewestFirst[i];
+  }
+  return null;
 }
 
 function isWithinFinishedCdWindow(value) {
@@ -1546,21 +1565,30 @@ async function fetchCdForRepo(repo) {
     try {
       const recentWorkflowRuns = await fetchWorkflowRuns(repo, workflow.id, { per_page: 20 });
       const completedRuns = recentWorkflowRuns.filter((run) => run.status === "completed");
-      const latest = completedRuns[0];
-      const failedAt = latest?.updated_at || latest?.created_at;
-      if (latest && FAILED_RUN_CONCLUSIONS.has(latest.conclusion) && isWithinFailedCdWindow(failedAt)) {
-        const failureReason = await fetchWorkflowRunFailureReason(repo, latest);
-        failureReasons.set(latest.id, failureReason);
+      for (const failedRun of selectFailedCdRuns(completedRuns)) {
+        const failedAt = failedRun.updated_at || failedRun.created_at;
+        const failureReason = await fetchWorkflowRunFailureReason(repo, failedRun);
+        failureReasons.set(failedRun.id, failureReason);
+        const supersedingRun = findSupersedingSuccessfulRun(completedRuns, failedRun);
+        const resolvedBy = supersedingRun
+          ? {
+              runNumber: `#${supersedingRun.run_number}`,
+              url: supersedingRun.html_url || "",
+              conclusion: supersedingRun.conclusion || "",
+              createdAt: supersedingRun.updated_at || supersedingRun.created_at || ""
+            }
+          : null;
         failed.push({
           createdAt: failedAt,
           repo,
           workflow: workflow.name,
-          runNumber: `#${latest.run_number}`,
-          conclusion: latest.conclusion || "",
+          runNumber: `#${failedRun.run_number}`,
+          conclusion: failedRun.conclusion || "",
           failureReason,
-          branch: latest.head_branch || "",
-          title: latest.display_title || "",
-          url: latest.html_url || ""
+          branch: failedRun.head_branch || "",
+          title: failedRun.display_title || "",
+          url: failedRun.html_url || "",
+          resolvedBy
         });
       }
       for (const [runIndex, run] of completedRuns.entries()) {
@@ -1816,7 +1844,8 @@ async function buildDashboardData(requestUrl) {
     skippedCd: finishedCd.filter((row) => row.outcome === "skipped").length,
     runningDeployments: runningDeployments.length,
     busyRunners: busyRunners.length,
-    failedCd: failedCd.length
+    failedCd: failedCd.length,
+    stillFailingCd: failedCd.filter((row) => !row.resolvedBy).length
   };
   const rateLimit = snapshotRateLimit(scanMetrics.getStore() || createScanMetrics());
   const warnings = buildDashboardWarnings(rateLimit, summary, { mode, jobs, includeCd, includeRunners, includeRepoRunners });
@@ -2304,5 +2333,7 @@ export {
   quotaState,
   recommendRefresh,
   runOutcome,
+  selectFailedCdRuns,
+  findSupersedingSuccessfulRun,
   server
 };
