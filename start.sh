@@ -9,6 +9,14 @@ cd "$(dirname "$0")"
 PORT="${PORT:-4177}"
 URL="http://localhost:${PORT}"
 
+# Load local env overrides (.env is gitignored — safe place for GITHUB_APP_ID, etc.)
+if [ -f "$(dirname "$0")/.env" ]; then
+  set -a
+  # shellcheck disable=SC1091
+  . "$(dirname "$0")/.env"
+  set +a
+fi
+
 bold()  { printf "\033[1m%s\033[0m\n" "$*"; }
 dim()   { printf "\033[2m%s\033[0m\n" "$*"; }
 red()   { printf "\033[31m%s\033[0m\n" "$*"; }
