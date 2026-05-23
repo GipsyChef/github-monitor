@@ -271,26 +271,75 @@ function githubUrl(path, query = {}) {
   return url;
 }
 
+const etagCache = new Map();
+const ETAG_CACHE_DISABLED = process.env.ETAG_CACHE_DISABLED === "1";
+const ETAG_CACHEABLE_METHODS = new Set(["GET", "HEAD"]);
+
+function isEtagCacheEnabled() {
+  return !ETAG_CACHE_DISABLED;
+}
+
+function applyConditionalHeaders(headers, store, url, method) {
+  if (!ETAG_CACHEABLE_METHODS.has(method)) return headers;
+  const cached = store.get(url);
+  if (!cached?.etag) return headers;
+  return { ...headers, "if-none-match": cached.etag };
+}
+
+function takeCachedConditionalResponse(store, url, method, status) {
+  if (status !== 304) return null;
+  if (!ETAG_CACHEABLE_METHODS.has(method)) return null;
+  const cached = store.get(url);
+  if (!cached) return null;
+  return cached.body;
+}
+
+function storeConditionalResponse(store, url, method, response, body) {
+  if (!ETAG_CACHEABLE_METHODS.has(method)) return false;
+  const etag = response.headers.get("etag");
+  if (!etag) {
+    store.delete(url);
+    return false;
+  }
+  store.set(url, { etag, body });
+  return true;
+}
+
 async function githubRequest(path, { method = "GET", query = {}, body } = {}) {
   const token = await getGitHubToken();
-  const response = await fetch(githubUrl(path, query), {
+  const url = githubUrl(path, query);
+  const cacheKey = url.toString();
+  const baseHeaders = {
+    "accept": "application/vnd.github+json",
+    "authorization": `Bearer ${token}`,
+    "content-type": "application/json",
+    "user-agent": "github-monitor-local",
+    "x-github-api-version": "2022-11-28"
+  };
+  const headers = isEtagCacheEnabled()
+    ? applyConditionalHeaders(baseHeaders, etagCache, cacheKey, method)
+    : baseHeaders;
+  const response = await fetch(url, {
     method,
-    headers: {
-      "accept": "application/vnd.github+json",
-      "authorization": `Bearer ${token}`,
-      "content-type": "application/json",
-      "user-agent": "github-monitor-local",
-      "x-github-api-version": "2022-11-28"
-    },
+    headers,
     body: body ? JSON.stringify(body) : undefined
   });
 
-  recordRateLimit(response);
+  recordRateLimit(response, { conditional: response.status === 304 });
+
+  if (isEtagCacheEnabled()) {
+    const cachedBody = takeCachedConditionalResponse(etagCache, cacheKey, method, response.status);
+    if (cachedBody !== null) return cachedBody;
+  }
+
   const text = await response.text();
   const json = text ? JSON.parse(text) : null;
   if (!response.ok) {
     const message = json?.message || text || `GitHub API returned ${response.status}`;
     throw new HttpError(response.status, message);
+  }
+  if (isEtagCacheEnabled()) {
+    storeConditionalResponse(etagCache, cacheKey, method, response, json);
   }
   return json;
 }
@@ -299,14 +348,16 @@ function createScanMetrics() {
   return {
     startedAt: new Date().toISOString(),
     requestCount: 0,
+    conditionalHits: 0,
     rateLimits: {}
   };
 }
 
-function recordRateLimit(response) {
+function recordRateLimit(response, { conditional = false } = {}) {
   const metrics = scanMetrics.getStore();
   if (!metrics) return;
   metrics.requestCount += 1;
+  if (conditional) metrics.conditionalHits += 1;
 
   const limit = Number(response.headers.get("x-ratelimit-limit"));
   const remaining = Number(response.headers.get("x-ratelimit-remaining"));
@@ -337,6 +388,7 @@ function snapshotRateLimit(metrics) {
   }, null);
   return {
     requestCount: metrics.requestCount,
+    conditionalHits: metrics.conditionalHits || 0,
     resources,
     tightest
   };
@@ -2335,5 +2387,8 @@ export {
   runOutcome,
   selectFailedCdRuns,
   findSupersedingSuccessfulRun,
+  applyConditionalHeaders,
+  takeCachedConditionalResponse,
+  storeConditionalResponse,
   server
 };

@@ -8,6 +8,7 @@ This project follows [Semantic Versioning](https://semver.org/) where practical.
 
 ### Added
 
+- GitHub REST GET requests now reuse ETag-based conditional caching: subsequent scans send `If-None-Match` and a 304 response is served from memory without consuming the primary rate limit. Warm dashboard refreshes now spend close to zero quota points where they previously spent dozens.
 - Server-managed auto merge now monitors eligible passing PRs in the selected scope, keeps the countdown active without relying on the browser tab, and exposes `/api/auto-merge`.
 - No-CI pull requests now appear in a dedicated view when they are non-draft, conflict-free, and reported as mergeable by GitHub.
 - Pull requests can be closed from the dashboard through `POST /api/pull-request/close`.

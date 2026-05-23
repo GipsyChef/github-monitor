@@ -20,6 +20,9 @@ import {
   runOutcome,
   selectFailedCdRuns,
   findSupersedingSuccessfulRun,
+  applyConditionalHeaders,
+  takeCachedConditionalResponse,
+  storeConditionalResponse,
   server
 } from "../server.js";
 
@@ -753,6 +756,54 @@ test("selectFailedCdRuns ignores non-completed runs and unknown timestamps", () 
 
   const failed = selectFailedCdRuns(runs, { now });
   assert.deepEqual(failed.map((run) => run.id), [4]);
+});
+
+test("conditional cache attaches If-None-Match only for GET/HEAD with a known ETag", () => {
+  const store = new Map();
+  const base = { accept: "application/vnd.github+json" };
+  // No cached entry → headers unchanged.
+  assert.deepEqual(applyConditionalHeaders(base, store, "https://api/x", "GET"), base);
+
+  // Mutation methods never read the cache, even when an ETag is known.
+  store.set("https://api/x", { etag: 'W/"abc"', body: { ok: true } });
+  assert.equal("if-none-match" in applyConditionalHeaders(base, store, "https://api/x", "POST"), false);
+  assert.equal("if-none-match" in applyConditionalHeaders(base, store, "https://api/x", "PATCH"), false);
+  assert.equal("if-none-match" in applyConditionalHeaders(base, store, "https://api/x", "DELETE"), false);
+
+  // GET with a cached ETag attaches the header without mutating the base headers.
+  const next = applyConditionalHeaders(base, store, "https://api/x", "GET");
+  assert.equal(next["if-none-match"], 'W/"abc"');
+  assert.equal(next.accept, "application/vnd.github+json");
+  assert.equal("if-none-match" in base, false);
+});
+
+test("304 returns the cached body and any other status returns null", () => {
+  const store = new Map();
+  store.set("https://api/x", { etag: 'W/"abc"', body: { value: 7 } });
+  assert.deepEqual(takeCachedConditionalResponse(store, "https://api/x", "GET", 304), { value: 7 });
+  // Different URL or method → no cached body.
+  assert.equal(takeCachedConditionalResponse(store, "https://api/y", "GET", 304), null);
+  assert.equal(takeCachedConditionalResponse(store, "https://api/x", "POST", 304), null);
+  // Non-304 statuses don't read the cache.
+  assert.equal(takeCachedConditionalResponse(store, "https://api/x", "GET", 200), null);
+  assert.equal(takeCachedConditionalResponse(store, "https://api/x", "GET", 404), null);
+});
+
+test("storeConditionalResponse caches GET bodies with their ETag and evicts entries that no longer carry one", () => {
+  const store = new Map();
+  const responseWithEtag = { headers: { get: (h) => (h.toLowerCase() === "etag" ? 'W/"v1"' : null) } };
+  const responseWithoutEtag = { headers: { get: () => null } };
+
+  assert.equal(storeConditionalResponse(store, "https://api/x", "GET", responseWithEtag, { value: 1 }), true);
+  assert.deepEqual(store.get("https://api/x"), { etag: 'W/"v1"', body: { value: 1 } });
+
+  // A later response that carries no ETag should evict the stale cached entry rather than serve it forever.
+  assert.equal(storeConditionalResponse(store, "https://api/x", "GET", responseWithoutEtag, { value: 2 }), false);
+  assert.equal(store.has("https://api/x"), false);
+
+  // Mutations never write the cache.
+  assert.equal(storeConditionalResponse(store, "https://api/x", "POST", responseWithEtag, { value: 3 }), false);
+  assert.equal(store.has("https://api/x"), false);
 });
 
 test("isBackendUrl accurately identifies backend and API subdomains", () => {
