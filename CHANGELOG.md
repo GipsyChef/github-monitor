@@ -29,6 +29,8 @@ This project follows [Semantic Versioning](https://semver.org/) where practical.
 
 ### Fixed
 
+- Failed CD now surfaces every workflow run that failed within the 3-day window, including failures that were superseded by a newer completed run. The previous "latest run only" logic silently hid failures whenever a follow-up redeploy succeeded or was skipped, while Finished CD still listed them as `FAILURE` — making the two views disagree on whether any deploys had failed.
+- Each Failed CD row now indicates whether it is still failing or has been resolved by a newer successful run, and the Failed CD scoreboard chip distinguishes "N still failing" from "all resolved".
 - Auto merge button now updates as soon as the server completes the merge, instead of staying stuck on "Merging" until the next periodic refresh.
 - Auto merge button is disabled while in the "Merging" state so a user cannot fire a duplicate merge request that races the server-side auto-merge scan.
 - Merge requests are rechecked server-side before merging and reject drafts, conflicts, failing checks, running checks, and no-CI PRs that GitHub does not currently report as mergeable.
