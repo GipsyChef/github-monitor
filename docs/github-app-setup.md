@@ -122,10 +122,59 @@ Hover the chip to see the per-bucket breakdown (account login, used/limit, reset
 
 Buckets are discovered incrementally as the server makes requests against each installation, so the count may grow over the first few scans before stabilising.
 
+## Step 6 — Allow the App through branch protection push restrictions
+
+If a target repository's default branch (or any branch you merge to from the dashboard) has a branch protection rule with "Restrict who can push to matching branches" enabled, the App must be in the allowlist or merges will fail with:
+
+```
+You're not authorized to push to this branch.
+```
+
+This is a GitHub branch protection check, not a missing App permission — the App identity is separate from your user identity, so being a repo admin yourself does not allow the App to push. The error surfaces in the server's auto-merge state (`/api/auto-merge` → `lastError`); the dashboard UI does not currently show it inline.
+
+To check whether a repo is affected:
+
+```sh
+gh api /repos/<owner>/<repo>/branches/<default-branch>/protection \
+  --jq '.restrictions // "no-push-restriction"'
+```
+
+A response of `no-push-restriction` (or `Branch not protected`, returned as HTTP 404) means the App can already push. If you see a `restrictions` object, add the App slug to its `apps` list:
+
+```sh
+echo '["<your-app-slug>"]' | gh api -X POST \
+  /repos/<owner>/<repo>/branches/<default-branch>/protection/restrictions/apps \
+  --input -
+```
+
+The App slug is the URL-friendly name from `github.com/apps/<slug>` — it is **not** the App ID. The endpoint expects a raw JSON array as the request body, not an object. The call is additive; existing users, teams, and apps in the allowlist are preserved.
+
+To audit and fix every repo a local projects folder tracks in one pass:
+
+```sh
+APP_SLUG="<your-app-slug>"
+for d in /path/to/projects/*/; do
+  [ -d "$d/.git" ] || continue
+  slug=$(git -C "$d" config --get remote.origin.url | sed -E 's|.*github.com[:/]([^/]+/[^/]+)|\1|; s|\.git$||')
+  default=$(gh api "/repos/$slug" --jq .default_branch 2>/dev/null) || continue
+  resp=$(gh api "/repos/$slug/branches/$default/protection" 2>/dev/null) || continue
+  needs_fix=$(echo "$resp" | python3 -c "import sys,json; d=json.loads(sys.stdin.read()); r=d.get('restrictions'); print('yes' if r and '$APP_SLUG' not in [a['slug'] for a in r.get('apps',[])] else 'no')") || continue
+  if [ "$needs_fix" = "yes" ]; then
+    echo "Adding $APP_SLUG to $slug ($default)"
+    echo "[\"$APP_SLUG\"]" | gh api -X POST "/repos/$slug/branches/$default/protection/restrictions/apps" --input - >/dev/null
+  fi
+done
+```
+
+If the repo has been renamed since you cloned it, the POST returns HTTP 307 — resolve the canonical owner/name via `gh api /repositories/<numeric-id>` and retry against the new path.
+
+## Scoping the dashboard to specific accounts
+
+When the App is installed on multiple accounts, the dashboard scans all of them by default. To focus on a subset, use the **Accounts** picker in the top bar — it lists every installation, lets you check the ones you want, and persists the choice in browser localStorage. The query parameter equivalent on `/api/status` is `?owners=org-a,org-b` (case-insensitive). The filter narrows PR searches, repo enumeration, CD scans, busy runners, and auto-merge candidates.
+
 ## Limitations of the App mode
 
 - `mine` mode in the dashboard filters PRs by author "me". Under App auth there is no human user identity behind the requests; the dashboard treats the first discovered installation's account login as "me" instead. If you depend on `mine` mode with a specific user identity, stay on PAT mode.
-- GraphQL queries (PR search) use the first discovered installation's token by default. If your search query asks about an organization that the App is not installed on, the result will be empty.
 - The App must be installed on at least one account before the server starts; otherwise the first request fails with "GitHub App has no installations."
 
 ## Falling back to PAT mode

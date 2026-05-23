@@ -202,7 +202,8 @@ const autoMergeState = {
   enabled: false,
   options: {
     mode: "all",
-    jobs: 4
+    jobs: 4,
+    owners: []
   },
   candidates: new Map(),
   running: false,
@@ -210,6 +211,14 @@ const autoMergeState = {
   lastScanAt: null,
   lastError: ""
 };
+
+function sameAutoMergeOwners(a, b) {
+  const left = Array.isArray(a) ? a : [];
+  const right = Array.isArray(b) ? b : [];
+  if (left.length !== right.length) return false;
+  const set = new Set(left.map((value) => String(value).toLowerCase()));
+  return right.every((value) => set.has(String(value).toLowerCase()));
+}
 
 const githubValueCache = new Map();
 
@@ -707,10 +716,11 @@ function refreshReason(activeCount, problemCount, quota) {
   return "Quiet dashboard";
 }
 
-async function githubGraphql(query, variables) {
+async function githubGraphql(query, variables, { ownerHint } = {}) {
   const json = await githubRequest(githubGraphqlUrl, {
     method: "POST",
-    body: { query, variables }
+    body: { query, variables },
+    ownerHint
   });
   if (json?.errors?.length) {
     throw new Error(json.errors.map((error) => error.message).join("; "));
@@ -772,6 +782,22 @@ function parseJobs(value) {
   const jobs = Number(value || process.env.OPEN_PRS_JOBS || 4);
   if (!Number.isInteger(jobs) || jobs < 1) return 4;
   return Math.min(jobs, 16);
+}
+
+function parseOwners(value) {
+  if (value == null) return [];
+  const raw = Array.isArray(value) ? value : String(value).split(",");
+  const seen = new Set();
+  const owners = [];
+  for (const item of raw) {
+    const trimmed = String(item || "").trim();
+    if (!trimmed) continue;
+    const key = trimmed.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    owners.push(trimmed);
+  }
+  return owners;
 }
 
 function parseRepo(value) {
@@ -1407,11 +1433,11 @@ function classifyPullRequest(pr) {
   };
 }
 
-async function fetchPrQuery(queryText) {
+async function fetchPrQuery(queryText, { ownerHint } = {}) {
   const pullRequests = [];
   let endCursor = null;
   for (let page = 0; page < 50; page += 1) {
-    const json = await githubGraphql(PR_SEARCH_GRAPHQL, { q: queryText, endCursor });
+    const json = await githubGraphql(PR_SEARCH_GRAPHQL, { q: queryText, endCursor }, { ownerHint });
     const search = json?.data?.search;
     if (!search) break;
     pullRequests.push(
@@ -1429,7 +1455,7 @@ async function fetchPrQuery(queryText) {
 
 async function fetchPullRequestByNumber(repo, number) {
   const { owner, name } = parseRepo(repo);
-  const json = await githubGraphql(PR_BY_NUMBER_GRAPHQL, { owner, name, number });
+  const json = await githubGraphql(PR_BY_NUMBER_GRAPHQL, { owner, name, number }, { ownerHint: owner });
   const pr = json?.data?.repository?.pullRequest;
   if (!pr) {
     throw new HttpError(404, `Pull request ${repo}#${number} was not found.`);
@@ -1461,22 +1487,40 @@ async function allOwners(me) {
   });
 }
 
+async function selectedOwners(me, ownerFilter) {
+  const all = await allOwners(me);
+  if (!ownerFilter || !ownerFilter.length) return all;
+  const wanted = new Set(ownerFilter.map((value) => String(value).toLowerCase()));
+  const filtered = all.filter((owner) => wanted.has(owner.toLowerCase()));
+  return filtered.length ? filtered : all;
+}
+
 function openPullRequestSearchQuery(qualifier, value) {
   return `is:pr state:open archived:false ${qualifier}:${value}`;
 }
 
-async function fetchPullRequests({ mode, me, jobs }) {
-  if (mode === "mine") return fetchPrQuery(openPullRequestSearchQuery("author", me));
-  if (mode === "owned") return fetchPrQuery(openPullRequestSearchQuery("owner", me));
-  const owners = await allOwners(me);
+async function fetchPullRequests({ mode, me, jobs, owners: ownerFilter }) {
+  const owners = await selectedOwners(me, ownerFilter);
+  const qualifier = mode === "mine" ? "author" : "owner";
+  const value = mode === "mine" || mode === "owned" ? me : null;
   const groups = await mapLimit(owners, jobs, async (owner) => {
     try {
-      return await fetchPrQuery(openPullRequestSearchQuery("owner", owner));
+      const q = openPullRequestSearchQuery(qualifier, value || owner);
+      return await fetchPrQuery(q, { ownerHint: owner });
     } catch {
       return [];
     }
   });
-  return uniqueBy(groups.flat(), (pr) => pr.url);
+  const merged = uniqueBy(groups.flat(), (pr) => pr.url);
+  // When the user has explicitly scoped to specific owners, also drop PRs that
+  // happen to surface from a token's view of public repos outside that scope
+  // (e.g. mode=mine returns author:me PRs an installation can see across repos
+  // even if the repo owner is not in the App's installation set).
+  if (ownerFilter && ownerFilter.length) {
+    const allowed = new Set(owners.map((owner) => owner.toLowerCase()));
+    return merged.filter((pr) => allowed.has(String(pr.repo || "").split("/")[0].toLowerCase()));
+  }
+  return merged;
 }
 
 async function fetchOwnerRepos(owner, me) {
@@ -1507,10 +1551,10 @@ async function fetchOwnerRepos(owner, me) {
   });
 }
 
-async function listRepos({ mode, me, pullRequests, jobs }) {
+async function listRepos({ mode, me, pullRequests, jobs, owners: ownerFilter }) {
   if (mode === "mine") return [...new Set(pullRequests.map((pr) => pr.repo))].sort();
   if (mode === "owned") return fetchOwnerRepos(me, me);
-  const owners = await allOwners(me);
+  const owners = await selectedOwners(me, ownerFilter);
   const groups = await mapLimit(owners, jobs, async (owner) => {
     try {
       return await fetchOwnerRepos(owner, me);
@@ -2015,12 +2059,12 @@ async function fetchBusyOrgRunners(owner) {
   }
 }
 
-async function fetchBusyRunners({ includeRepoRunners, repos, pullRequests, mode, me, jobs }) {
+async function fetchBusyRunners({ includeRepoRunners, repos, pullRequests, mode, me, jobs, owners: ownerFilter }) {
   const ownerSet = new Set();
   for (const pr of pullRequests) ownerSet.add(pr.repo.split("/")[0]);
   for (const repo of repos) ownerSet.add(repo.split("/")[0]);
   if (mode === "all") {
-    for (const owner of await allOwners(me)) ownerSet.add(owner);
+    for (const owner of await selectedOwners(me, ownerFilter)) ownerSet.add(owner);
   }
   if (mode === "owned") ownerSet.add(me);
 
@@ -2038,17 +2082,18 @@ async function buildBusyRunnerData(requestUrl) {
   const mode = normalizeMode(params.get("mode"));
   const jobs = parseJobs(params.get("jobs"));
   const includeRepoRunners = parseBool(params.get("includeRepoRunners"), false);
+  const owners = parseOwners(params.get("owners"));
   const me = await getAccount();
-  const pullRequests = await fetchPullRequests({ mode, me, jobs });
-  const repos = includeRepoRunners ? await listRepos({ mode, me, pullRequests, jobs }) : [];
-  const busyRunners = await fetchBusyRunners({ includeRepoRunners, repos, pullRequests, mode, me, jobs });
+  const pullRequests = await fetchPullRequests({ mode, me, jobs, owners });
+  const repos = includeRepoRunners ? await listRepos({ mode, me, pullRequests, jobs, owners }) : [];
+  const busyRunners = await fetchBusyRunners({ includeRepoRunners, repos, pullRequests, mode, me, jobs, owners });
   const sortedBusyRunners = busyRunners.sort((a, b) =>
     `${a.level}/${a.scope}/${a.name}`.localeCompare(`${b.level}/${b.scope}/${b.name}`)
   );
   return {
     account: me,
     generatedAt: new Date().toISOString(),
-    options: { mode, jobs, includeRepoRunners },
+    options: { mode, jobs, includeRepoRunners, owners },
     summary: {
       busyRunners: sortedBusyRunners.length,
       repos: repos.length || new Set(pullRequests.map((pr) => pr.repo)).size
@@ -2067,8 +2112,9 @@ async function buildDashboardData(requestUrl) {
   const includeCd = parseBool(params.get("includeCd"), true);
   const includeRunners = parseBool(params.get("includeRunners"), false) || parseBool(params.get("includeRepoRunners"), false);
   const includeRepoRunners = parseBool(params.get("includeRepoRunners"), false);
+  const owners = parseOwners(params.get("owners"));
   const me = await getAccount();
-  const pullRequests = await fetchPullRequests({ mode, me, jobs });
+  const pullRequests = await fetchPullRequests({ mode, me, jobs, owners });
   let repos = [];
   let failedCd = [];
   let finishedCd = [];
@@ -2077,7 +2123,7 @@ async function buildDashboardData(requestUrl) {
   let runningDeployments = [];
   let busyRunners = [];
 
-  repos = await listRepos({ mode, me, pullRequests, jobs });
+  repos = await listRepos({ mode, me, pullRequests, jobs, owners });
 
   if (repos.length) {
     const actionGroups = await mapLimit(repos, jobs, fetchRunningActionsForRepo);
@@ -2095,11 +2141,12 @@ async function buildDashboardData(requestUrl) {
   }
 
   if (includeRunners) {
-    busyRunners = await fetchBusyRunners({ includeRepoRunners, repos, pullRequests, mode, me, jobs });
+    busyRunners = await fetchBusyRunners({ includeRepoRunners, repos, pullRequests, mode, me, jobs, owners });
   }
 
   const prGroups = groupPullRequests(pullRequests);
-  syncAutoMergeFromStatus(pullRequests, { mode, jobs });
+  syncAutoMergeFromStatus(pullRequests, { mode, jobs, owners });
+  const accounts = await allOwners(me);
   const summary = {
     repos: repos.length || new Set(pullRequests.map((pr) => pr.repo)).size,
     passingPrs: prGroups.pass.length,
@@ -2119,8 +2166,9 @@ async function buildDashboardData(requestUrl) {
 
   return {
     account: me,
+    accounts,
     generatedAt: new Date().toISOString(),
-    options: { mode, jobs, includeCd, includeRunners, includeRepoRunners },
+    options: { mode, jobs, includeCd, includeRunners, includeRepoRunners, owners },
     summary,
     rateLimit,
     warnings,
@@ -2154,6 +2202,7 @@ function autoMergeSnapshot() {
     running: autoMergeState.running,
     mode: autoMergeState.options.mode,
     jobs: autoMergeState.options.jobs,
+    owners: autoMergeState.options.owners || [],
     lastScanAt: autoMergeState.lastScanAt,
     lastError: autoMergeState.lastError,
     candidates: [...autoMergeState.candidates.values()]
@@ -2207,7 +2256,9 @@ function syncAutoMergeCandidates(pullRequests) {
 
 function syncAutoMergeFromStatus(pullRequests, options) {
   if (!autoMergeState.enabled) return;
-  if (autoMergeState.options.mode !== options.mode || autoMergeState.options.jobs !== options.jobs) return;
+  if (autoMergeState.options.mode !== options.mode) return;
+  if (autoMergeState.options.jobs !== options.jobs) return;
+  if (!sameAutoMergeOwners(autoMergeState.options.owners, options.owners)) return;
   syncAutoMergeCandidates(pullRequests);
   if (!autoMergeState.running) {
     clearAutoMergeTimer();
@@ -2267,7 +2318,8 @@ async function runAutoMergeScan() {
       const pullRequests = await fetchPullRequests({
         mode: autoMergeState.options.mode,
         me,
-        jobs: autoMergeState.options.jobs
+        jobs: autoMergeState.options.jobs,
+        owners: autoMergeState.options.owners
       });
       syncAutoMergeCandidates(pullRequests);
     });
@@ -2312,9 +2364,13 @@ async function autoMergeConfig(req, res) {
   const body = await readJsonBody(req);
   const nextOptions = {
     mode: normalizeMode(body.mode),
-    jobs: parseJobs(body.jobs)
+    jobs: parseJobs(body.jobs),
+    owners: parseOwners(body.owners)
   };
-  const optionsChanged = autoMergeState.options.mode !== nextOptions.mode || autoMergeState.options.jobs !== nextOptions.jobs;
+  const optionsChanged =
+    autoMergeState.options.mode !== nextOptions.mode ||
+    autoMergeState.options.jobs !== nextOptions.jobs ||
+    !sameAutoMergeOwners(autoMergeState.options.owners, nextOptions.owners);
   autoMergeState.enabled = Boolean(body.enabled);
   autoMergeState.options = nextOptions;
   autoMergeState.lastError = "";
@@ -2615,5 +2671,7 @@ export {
   buildAppJwtPayload,
   signAppJwt,
   installationTokenIsValid,
+  parseOwners,
+  sameAutoMergeOwners,
   server
 };

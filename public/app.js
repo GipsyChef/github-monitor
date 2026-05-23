@@ -14,6 +14,9 @@ const state = {
   view: persisted.view || "fail",
   filter: persisted.filter || "",
   notifications: persisted.notifications !== false,
+  owners: Array.isArray(persisted.owners) ? persisted.owners.filter((value) => typeof value === "string" && value.trim()) : [],
+  accounts: [],
+  ownerPickerOpen: false,
   activitySnapshot: null,
   refreshTimer: null,
   refreshRetryCount: 0,
@@ -135,7 +138,14 @@ const els = {
   inboxList: document.querySelector("#inboxList"),
   inboxEmpty: document.querySelector("#inboxEmpty"),
   inboxMarkAll: document.querySelector("#inboxMarkAll"),
-  inboxClear: document.querySelector("#inboxClear")
+  inboxClear: document.querySelector("#inboxClear"),
+  ownerPicker: document.querySelector("#ownerPicker"),
+  ownerPickerToggle: document.querySelector("#ownerPickerToggle"),
+  ownerPickerSummary: document.querySelector("#ownerPickerSummary"),
+  ownerPickerPanel: document.querySelector("#ownerPickerPanel"),
+  ownerPickerList: document.querySelector("#ownerPickerList"),
+  ownerPickerAll: document.querySelector("#ownerPickerAll"),
+  ownerPickerClose: document.querySelector("#ownerPickerClose")
 };
 
 const metricIds = {
@@ -217,7 +227,8 @@ function persist() {
         view: state.view,
         filter: state.filter,
         autoMerge: state.autoMerge,
-        notifications: state.notifications
+        notifications: state.notifications,
+        owners: state.owners
       })
     );
   } catch {}
@@ -415,7 +426,8 @@ async function configureServerAutoMerge() {
     body: JSON.stringify({
       enabled: state.autoMerge,
       mode: state.mode,
-      jobs: 4
+      jobs: 4,
+      owners: state.owners
     })
   });
   const data = await response.json().catch(() => ({}));
@@ -879,13 +891,15 @@ async function refreshAfterMutation(source) {
 }
 
 function buildParams() {
-  return new URLSearchParams({
+  const params = new URLSearchParams({
     mode: state.mode,
     includeCd: els.includeCd.checked ? "1" : "0",
     includeRunners: els.includeRunners.checked ? "1" : "0",
     includeRepoRunners: "0",
     jobs: "4"
   });
+  if (state.owners.length) params.set("owners", state.owners.join(","));
+  return params;
 }
 
 async function refresh({ source = "manual" } = {}) {
@@ -1009,6 +1023,10 @@ function render() {
   lastGeneratedAt = data.generatedAt;
   els.generatedAt.textContent = formatRelative(data.generatedAt);
   ensureGeneratedTicker();
+
+  if (Array.isArray(data.accounts)) {
+    syncAccountOptions(data.accounts);
+  }
 
   setError(dashboardWarning(data), "warning");
   renderRefreshStatus();
@@ -1715,6 +1733,100 @@ function setMode(mode) {
   }
 }
 
+function syncAccountOptions(accounts) {
+  const cleaned = [...new Set(accounts.filter((value) => typeof value === "string" && value.trim()))];
+  const sameAccounts = cleaned.length === state.accounts.length
+    && cleaned.every((value, index) => value === state.accounts[index]);
+  if (sameAccounts) {
+    renderOwnerPicker();
+    return;
+  }
+  state.accounts = cleaned;
+  const allowed = new Set(cleaned.map((value) => value.toLowerCase()));
+  const trimmedOwners = state.owners.filter((value) => allowed.has(value.toLowerCase()));
+  if (trimmedOwners.length !== state.owners.length) {
+    state.owners = trimmedOwners;
+    persist();
+  }
+  renderOwnerPicker();
+}
+
+function ownerPickerSummary() {
+  if (!state.owners.length) return "All";
+  if (state.accounts.length && state.owners.length === state.accounts.length) return "All";
+  if (state.owners.length === 1) return state.owners[0];
+  return state.accounts.length
+    ? `${state.owners.length} of ${state.accounts.length}`
+    : `${state.owners.length} selected`;
+}
+
+function renderOwnerPicker() {
+  if (!els.ownerPicker) return;
+  if (!state.accounts.length && !state.owners.length) {
+    els.ownerPicker.hidden = true;
+    return;
+  }
+  els.ownerPicker.hidden = false;
+  els.ownerPickerSummary.textContent = ownerPickerSummary();
+  const isAll = !state.owners.length
+    || (state.accounts.length && state.owners.length === state.accounts.length);
+  els.ownerPickerSummary.classList.toggle("is-all", isAll);
+  els.ownerPickerToggle.title = isAll
+    ? "Limit dashboard scope to specific accounts"
+    : `Showing only: ${state.owners.join(", ")}`;
+  // Until the API returns the real installation list, fall back to whatever
+  // is persisted so the picker still reflects the active filter.
+  const accountSource = state.accounts.length ? state.accounts : state.owners;
+  const selected = new Set(state.owners.map((value) => value.toLowerCase()));
+  if (!accountSource.length) {
+    els.ownerPickerList.innerHTML = `<p class="owner-picker-option-empty">Loading installations…</p>`;
+    return;
+  }
+  els.ownerPickerList.innerHTML = accountSource
+    .map((account) => {
+      const checked = selected.size === 0 || selected.has(account.toLowerCase());
+      return `<label class="owner-picker-option" role="listitem">
+          <input type="checkbox" data-account="${escapeHtml(account)}" ${checked ? "checked" : ""} />
+          <span>${escapeHtml(account)}</span>
+        </label>`;
+    })
+    .join("");
+}
+
+function commitOwnerSelectionFromPanel() {
+  const inputs = els.ownerPickerList.querySelectorAll("input[type='checkbox']");
+  const checked = [];
+  inputs.forEach((input) => {
+    if (input.checked) checked.push(input.dataset.account);
+  });
+  const isAll = checked.length === 0 || checked.length === state.accounts.length;
+  const nextOwners = isAll ? [] : checked;
+  const before = state.owners.join(",").toLowerCase();
+  const after = nextOwners.join(",").toLowerCase();
+  if (before === after) return false;
+  state.owners = nextOwners;
+  persist();
+  return true;
+}
+
+function setOwnerPickerOpen(open) {
+  state.ownerPickerOpen = open;
+  if (!els.ownerPickerPanel) return;
+  els.ownerPickerPanel.classList.toggle("hidden", !open);
+  els.ownerPickerPanel.setAttribute("aria-hidden", open ? "false" : "true");
+  els.ownerPickerToggle.setAttribute("aria-expanded", open ? "true" : "false");
+  if (open) renderOwnerPicker();
+}
+
+function applyOwnerChange() {
+  renderOwnerPicker();
+  if (state.autoMerge) {
+    configureServerAutoMerge().finally(() => refresh());
+  } else {
+    refresh();
+  }
+}
+
 async function mergePullRequest(button) {
   const repo = button.dataset.repo;
   const number = Number(button.dataset.number);
@@ -1810,6 +1922,47 @@ async function closePullRequest(button) {
 document.querySelectorAll(".segment").forEach((button) => {
   button.addEventListener("click", () => setMode(button.dataset.mode));
 });
+
+if (els.ownerPickerToggle) {
+  els.ownerPickerToggle.addEventListener("click", (event) => {
+    event.stopPropagation();
+    setOwnerPickerOpen(!state.ownerPickerOpen);
+  });
+}
+if (els.ownerPickerPanel) {
+  els.ownerPickerPanel.addEventListener("click", (event) => event.stopPropagation());
+}
+if (els.ownerPickerAll) {
+  els.ownerPickerAll.addEventListener("click", () => {
+    const before = state.owners.length;
+    state.owners = [];
+    persist();
+    renderOwnerPicker();
+    setOwnerPickerOpen(false);
+    if (before > 0) applyOwnerChange();
+  });
+}
+if (els.ownerPickerClose) {
+  els.ownerPickerClose.addEventListener("click", () => {
+    const changed = commitOwnerSelectionFromPanel();
+    setOwnerPickerOpen(false);
+    if (changed) applyOwnerChange();
+  });
+}
+document.addEventListener("click", (event) => {
+  if (!state.ownerPickerOpen) return;
+  if (!els.ownerPicker) return;
+  if (els.ownerPicker.contains(event.target)) return;
+  const changed = commitOwnerSelectionFromPanel();
+  setOwnerPickerOpen(false);
+  if (changed) applyOwnerChange();
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && state.ownerPickerOpen) {
+    setOwnerPickerOpen(false);
+  }
+});
+renderOwnerPicker();
 
 document.querySelectorAll(".rail-item").forEach((button) => {
   button.addEventListener("click", () => setView(button.dataset.view));
