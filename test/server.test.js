@@ -15,6 +15,11 @@ import {
   mergeBlockReason,
   openPullRequestSearchQuery,
   quotaState,
+  recordRateLimit,
+  snapshotRateLimit,
+  resetObservedRateBuckets,
+  createScanMetrics,
+  scanMetrics,
   recommendRefresh,
   publicRouteFromFile,
   isBackendUrl,
@@ -883,4 +888,88 @@ test("installationTokenIsValid requires a 90-second safety margin before expiry"
   assert.equal(installationTokenIsValid({ token: "x", expiresAt: now + 90 }, now), false);
   // Already expired.
   assert.equal(installationTokenIsValid({ token: "x", expiresAt: now - 1 }, now), false);
+});
+
+function fakeResponse({ limit, remaining, reset, resource = "core", used }) {
+  const headers = new Map([
+    ["x-ratelimit-limit", String(limit)],
+    ["x-ratelimit-remaining", String(remaining)],
+    ["x-ratelimit-reset", String(reset)],
+    ["x-ratelimit-resource", resource]
+  ]);
+  if (used !== undefined) headers.set("x-ratelimit-used", String(used));
+  return { headers: { get: (key) => headers.get(key) ?? null } };
+}
+
+test("recordRateLimit accumulates one bucket per (resource, installation) across scans", async () => {
+  resetObservedRateBuckets();
+  const reset = Math.floor(Date.now() / 1000) + 3600;
+  // Simulate two separate scans that each only hit a subset of installations.
+  await scanMetrics.run(createScanMetrics(), async () => {
+    recordRateLimit(fakeResponse({ limit: 5000, remaining: 4999, reset }), { installationKey: "cigan1" });
+    recordRateLimit(fakeResponse({ limit: 6450, remaining: 5475, reset }), { installationKey: "gipsychef" });
+  });
+  await scanMetrics.run(createScanMetrics(), async () => {
+    recordRateLimit(fakeResponse({ limit: 5000, remaining: 4998, reset }), { installationKey: "siftfy" });
+  });
+  // Second scan saw only siftfy, but the snapshot still includes cigan1 and gipsychef.
+  const snap = snapshotRateLimit(scanMetrics.getStore() || createScanMetrics());
+  assert.equal(snap.bucketCount, 3);
+  const keys = snap.buckets.map((b) => b.installationKey).sort();
+  assert.deepEqual(keys, ["cigan1", "gipsychef", "siftfy"]);
+});
+
+test("snapshotRateLimit picks tightest by ratio across installations", () => {
+  resetObservedRateBuckets();
+  const reset = Math.floor(Date.now() / 1000) + 3600;
+  // GipsyChef has a higher limit but is more depleted by ratio.
+  recordRateLimit(fakeResponse({ limit: 5000, remaining: 4999, reset, used: 1 }), { installationKey: "cigan1" });
+  recordRateLimit(fakeResponse({ limit: 6450, remaining: 1000, reset, used: 5450 }), { installationKey: "gipsychef" });
+  recordRateLimit(fakeResponse({ limit: 5000, remaining: 4500, reset, used: 500 }), { installationKey: "siftfy" });
+  const snap = snapshotRateLimit(createScanMetrics());
+  assert.equal(snap.bucketCount, 3);
+  assert.equal(snap.tightest.installationKey, "gipsychef");
+  assert.equal(snap.buckets[0].installationKey, "gipsychef");
+  assert.equal(snap.buckets.length, 3);
+  // resources collapses to one-per-resource (the tightest installation per resource).
+  assert.equal(snap.resources.length, 1);
+  assert.equal(snap.resources[0].installationKey, "gipsychef");
+});
+
+test("snapshotRateLimit single-bucket case mirrors PAT mode", () => {
+  resetObservedRateBuckets();
+  const reset = Math.floor(Date.now() / 1000) + 3600;
+  recordRateLimit(fakeResponse({ limit: 5000, remaining: 3068, reset, used: 1932 }), { installationKey: "pat" });
+  const snap = snapshotRateLimit(createScanMetrics());
+  assert.equal(snap.bucketCount, 1);
+  assert.equal(snap.tightest.installationKey, "pat");
+  assert.equal(snap.tightest.remaining, 3068);
+});
+
+test("snapshotRateLimit picks tightest across mixed resources and installations", () => {
+  resetObservedRateBuckets();
+  const reset = Math.floor(Date.now() / 1000) + 3600;
+  recordRateLimit(fakeResponse({ limit: 6450, remaining: 5000, reset, used: 1450 }), { installationKey: "gipsychef" });
+  // search bucket is much smaller and more depleted by ratio.
+  recordRateLimit(fakeResponse({ resource: "search", limit: 30, remaining: 2, reset, used: 28 }), { installationKey: "gipsychef" });
+  const snap = snapshotRateLimit(createScanMetrics());
+  assert.equal(snap.tightest.resource, "search");
+  assert.equal(snap.tightest.remaining, 2);
+  assert.equal(snap.bucketCount, 2);
+});
+
+test("recordRateLimit ratchets remaining downward within the same reset window", () => {
+  resetObservedRateBuckets();
+  const reset = Math.floor(Date.now() / 1000) + 3600;
+  recordRateLimit(fakeResponse({ limit: 5000, remaining: 4500, reset }), { installationKey: "cigan1" });
+  // A stale response with a higher `remaining` arrives — must not overwrite the lower value.
+  recordRateLimit(fakeResponse({ limit: 5000, remaining: 4700, reset }), { installationKey: "cigan1" });
+  const snap = snapshotRateLimit(createScanMetrics());
+  assert.equal(snap.buckets[0].remaining, 4500);
+
+  // After the reset window changes, accept the fresh higher quota.
+  const newerReset = reset + 3600;
+  recordRateLimit(fakeResponse({ limit: 5000, remaining: 5000, reset: newerReset }), { installationKey: "cigan1" });
+  const snap2 = snapshotRateLimit(createScanMetrics());
+  assert.equal(snap2.buckets[0].remaining, 5000);
 });

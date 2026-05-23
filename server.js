@@ -270,7 +270,8 @@ async function getGitHubToken({ ownerHint = null } = {}) {
   if (APP_AUTH_ENABLED) {
     return getInstallationToken(ownerHint);
   }
-  return getPatToken();
+  const token = await getPatToken();
+  return { token, installationKey: "pat" };
 }
 
 function extractOwnerFromPath(path) {
@@ -414,11 +415,11 @@ async function getInstallationToken(ownerHint) {
   const nowSeconds = Math.floor(Date.now() / 1000);
   const cached = installationTokensByOwner.get(cacheKey);
   if (installationTokenIsValid(cached, nowSeconds)) {
-    return cached.token;
+    return { token: cached.token, installationKey: cacheKey };
   }
   const minted = await mintInstallationToken(installation.installationId);
   installationTokensByOwner.set(cacheKey, minted);
-  return minted.token;
+  return { token: minted.token, installationKey: cacheKey };
 }
 
 function githubUrl(path, query = {}) {
@@ -467,7 +468,7 @@ function storeConditionalResponse(store, url, method, response, body) {
 
 async function githubRequest(path, { method = "GET", query = {}, body, ownerHint } = {}) {
   const effectiveOwnerHint = ownerHint || extractOwnerFromPath(path);
-  const token = await getGitHubToken({ ownerHint: effectiveOwnerHint });
+  const { token, installationKey } = await getGitHubToken({ ownerHint: effectiveOwnerHint });
   const url = githubUrl(path, query);
   const cacheKey = url.toString();
   const baseHeaders = {
@@ -486,7 +487,7 @@ async function githubRequest(path, { method = "GET", query = {}, body, ownerHint
     body: body ? JSON.stringify(body) : undefined
   });
 
-  recordRateLimit(response, { conditional: response.status === 304 });
+  recordRateLimit(response, { conditional: response.status === 304, installationKey });
 
   if (isEtagCacheEnabled()) {
     const cachedBody = takeCachedConditionalResponse(etagCache, cacheKey, method, response.status);
@@ -509,16 +510,25 @@ function createScanMetrics() {
   return {
     startedAt: new Date().toISOString(),
     requestCount: 0,
-    conditionalHits: 0,
-    rateLimits: {}
+    conditionalHits: 0
   };
 }
 
-function recordRateLimit(response, { conditional = false } = {}) {
+// Server-wide rate-limit bucket cache. Keyed by `${resource}::${installationKey}`.
+// Cumulative across scans so the dashboard chip shows a stable multi-installation
+// view even when a single scan only happens to touch a subset of installations.
+const observedRateBuckets = new Map();
+
+function resetObservedRateBuckets() {
+  observedRateBuckets.clear();
+}
+
+function recordRateLimit(response, { conditional = false, installationKey = "pat" } = {}) {
   const metrics = scanMetrics.getStore();
-  if (!metrics) return;
-  metrics.requestCount += 1;
-  if (conditional) metrics.conditionalHits += 1;
+  if (metrics) {
+    metrics.requestCount += 1;
+    if (conditional) metrics.conditionalHits += 1;
+  }
 
   const limit = Number(response.headers.get("x-ratelimit-limit"));
   const remaining = Number(response.headers.get("x-ratelimit-remaining"));
@@ -527,30 +537,47 @@ function recordRateLimit(response, { conditional = false } = {}) {
   const resource = response.headers.get("x-ratelimit-resource") || "core";
   if (!Number.isFinite(limit) || !Number.isFinite(remaining) || !Number.isFinite(reset)) return;
 
-  const previous = metrics.rateLimits[resource];
-  metrics.rateLimits[resource] = {
+  const resetAt = new Date(reset * 1000).toISOString();
+  const key = `${resource}::${installationKey}`;
+  const previous = observedRateBuckets.get(key);
+  const bucket = {
     resource,
+    installationKey,
     limit,
     remaining,
     used: Number.isFinite(used) ? used : null,
-    resetAt: new Date(reset * 1000).toISOString()
+    resetAt
   };
-
-  if (previous && previous.remaining < remaining) {
-    metrics.rateLimits[resource].remaining = previous.remaining;
+  // Within a single reset window, only ratchet `remaining` downward — never let a
+  // stale out-of-order response bump it back up. After the reset window changes,
+  // accept the fresh quota as the new baseline.
+  if (previous && previous.resetAt === bucket.resetAt && previous.remaining < remaining) {
+    bucket.remaining = previous.remaining;
   }
+  observedRateBuckets.set(key, bucket);
 }
 
 function snapshotRateLimit(metrics) {
-  const resources = Object.values(metrics.rateLimits).sort((a, b) => a.resource.localeCompare(b.resource));
-  const tightest = resources.reduce((lowest, item) => {
-    if (!lowest) return item;
-    return item.remaining / item.limit < lowest.remaining / lowest.limit ? item : lowest;
-  }, null);
+  const buckets = [...observedRateBuckets.values()].sort((a, b) => {
+    const ratioA = a.remaining / Math.max(1, a.limit);
+    const ratioB = b.remaining / Math.max(1, b.limit);
+    if (ratioA !== ratioB) return ratioA - ratioB;
+    return a.resource.localeCompare(b.resource) || a.installationKey.localeCompare(b.installationKey);
+  });
+  const tightest = buckets[0] || null;
+  const resources = [];
+  const seenResource = new Set();
+  for (const bucket of buckets) {
+    if (seenResource.has(bucket.resource)) continue;
+    seenResource.add(bucket.resource);
+    resources.push(bucket);
+  }
   return {
-    requestCount: metrics.requestCount,
-    conditionalHits: metrics.conditionalHits || 0,
+    requestCount: metrics?.requestCount ?? 0,
+    conditionalHits: metrics?.conditionalHits ?? 0,
     resources,
+    buckets,
+    bucketCount: buckets.length,
     tightest
   };
 }
@@ -2572,6 +2599,11 @@ export {
   mergeBlockReason,
   openPullRequestSearchQuery,
   quotaState,
+  recordRateLimit,
+  snapshotRateLimit,
+  resetObservedRateBuckets,
+  createScanMetrics,
+  scanMetrics,
   recommendRefresh,
   runOutcome,
   selectFailedCdRuns,
