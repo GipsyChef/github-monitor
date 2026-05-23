@@ -17,6 +17,7 @@ import {
   recommendRefresh,
   publicRouteFromFile,
   isBackendUrl,
+  runOutcome,
   server
 } from "../server.js";
 
@@ -658,6 +659,25 @@ test("dashboard includes running non-CD workflow runs in CI running work", async
     if (previousToken == null) delete process.env.GITHUB_TOKEN;
     else process.env.GITHUB_TOKEN = previousToken;
   }
+});
+
+test("workflow run conclusions are classified into actionable outcomes", () => {
+  assert.equal(runOutcome({ conclusion: "success" }), "success");
+  assert.equal(runOutcome({ conclusion: "neutral" }), "success");
+  assert.equal(runOutcome({ conclusion: "skipped" }), "skipped");
+  assert.equal(runOutcome({ conclusion: "SKIPPED" }), "skipped");
+  assert.equal(runOutcome({ conclusion: "failure" }), "failure");
+  assert.equal(runOutcome({ conclusion: "cancelled" }), "failure");
+  assert.equal(runOutcome({ conclusion: "timed_out" }), "failure");
+  assert.equal(runOutcome({ conclusion: "startup_failure" }), "failure");
+  assert.equal(runOutcome({ conclusion: null }), "completed");
+  assert.equal(runOutcome({}), "completed");
+});
+
+test("dashboard scoreboard surfaces skipped CD runs without a new lane", () => {
+  assert.match(indexHtml, /id="metricFinishedCdSub"/);
+  assert.match(indexHtml, /id="navFinishedCdDot"/);
+  assert.match(indexHtml, /class="metric metric-green"[\s\S]*?id="metricFinishedCdSub"/);
 });
 
 test("isBackendUrl accurately identifies backend and API subdomains", () => {
