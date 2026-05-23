@@ -1871,7 +1871,8 @@ async function buildDashboardData(requestUrl) {
 
   if (includeCd && repos.length) {
     const cdGroups = await mapLimit(repos, jobs, fetchCdForRepo);
-    failedCd = uniqueBy(cdGroups.flatMap((group) => group.failed), (run) => run.url || JSON.stringify(run));
+    failedCd = uniqueBy(cdGroups.flatMap((group) => group.failed), (run) => run.url || JSON.stringify(run))
+      .filter((run) => !run.resolvedBy);
     finishedCd = uniqueBy(cdGroups.flatMap((group) => group.finished), (run) => run.url || JSON.stringify(run));
     runningCd = uniqueBy(cdGroups.flatMap((group) => group.running), (run) => run.url || JSON.stringify(run));
     const deploymentGroups = await mapLimit(repos, jobs, fetchRunningDeploymentsForRepo);
@@ -1896,8 +1897,7 @@ async function buildDashboardData(requestUrl) {
     skippedCd: finishedCd.filter((row) => row.outcome === "skipped").length,
     runningDeployments: runningDeployments.length,
     busyRunners: busyRunners.length,
-    failedCd: failedCd.length,
-    stillFailingCd: failedCd.filter((row) => !row.resolvedBy).length
+    failedCd: failedCd.length
   };
   const rateLimit = snapshotRateLimit(scanMetrics.getStore() || createScanMetrics());
   const warnings = buildDashboardWarnings(rateLimit, summary, { mode, jobs, includeCd, includeRunners, includeRepoRunners });

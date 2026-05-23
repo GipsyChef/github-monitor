@@ -99,8 +99,8 @@ const views = {
   },
   failedCd: {
     kicker: "Failed CD Actions",
-    title: "Recent deploy failures (last 3 days)",
-    empty: "No failed CD actions.",
+    title: "CD workflows still failing",
+    empty: "No CD workflows are still failing.",
     color: "ink",
     rows: (data) => data.cd.failed
   }
@@ -917,32 +917,10 @@ function renderMetrics(data) {
     finishedCdDot.classList.toggle("green", skippedCd === 0);
   }
   const failedCdTotal = Number(data.summary.failedCd || 0);
-  const stillFailingCd = Number(data.summary.stillFailingCd ?? failedCdTotal);
-  const failedCdSub = document.querySelector("#metricFailedCdSub");
-  if (failedCdSub) {
-    const resolvedCount = Math.max(0, failedCdTotal - stillFailingCd);
-    if (stillFailingCd > 0) {
-      failedCdSub.textContent = `${stillFailingCd} still failing`;
-      failedCdSub.setAttribute("aria-label", `${stillFailingCd} of ${failedCdTotal} recent CD failures are still unresolved`);
-      failedCdSub.classList.add("metric-sub-danger");
-      failedCdSub.classList.remove("metric-sub-muted");
-      failedCdSub.hidden = false;
-    } else if (resolvedCount > 0) {
-      failedCdSub.textContent = `all resolved`;
-      failedCdSub.setAttribute("aria-label", `All ${resolvedCount} recent CD failures have been superseded by a newer successful run`);
-      failedCdSub.classList.remove("metric-sub-danger");
-      failedCdSub.classList.add("metric-sub-muted");
-      failedCdSub.hidden = false;
-    } else {
-      failedCdSub.textContent = "";
-      failedCdSub.removeAttribute("aria-label");
-      failedCdSub.hidden = true;
-    }
-  }
   const failedCdDot = document.querySelector("#navFailedCdDot");
   if (failedCdDot) {
-    failedCdDot.classList.toggle("red", stillFailingCd > 0);
-    failedCdDot.classList.toggle("ink", stillFailingCd === 0);
+    failedCdDot.classList.toggle("red", failedCdTotal > 0);
+    failedCdDot.classList.toggle("ink", failedCdTotal === 0);
   }
   const navCounts = {
     pass: data.summary.passingPrs,
@@ -1139,9 +1117,7 @@ function renderCdRow(row, view, viewKey) {
   const detail = viewKey === "failedCd" || row.failureReason
     ? [`Reason: ${failureDetail(row, "CD failed")}`, timeDetail].filter(Boolean).join(" · ")
     : timeDetail;
-  const tagCell = viewKey === "failedCd"
-    ? `<div class="tag-group"><span class="tag tag-${statusClass(status)}">${escapeHtml(status)}</span>${renderFailedCdResolutionTag(row)}</div>`
-    : `<div class="tag">${escapeHtml(status)}</div>`;
+  const tagClass = viewKey === "failedCd" ? `tag tag-${statusClass(status)}` : "tag";
   return `
     <article class="row" data-href="${escapeHtml(row.url || "")}" style="--accent: var(--${view.color}); --soft: var(--${view.color}-soft);">
       <div class="row-main">
@@ -1149,23 +1125,11 @@ function renderCdRow(row, view, viewKey) {
         <div class="title">${escapeHtml(row.title || row.workflow)}</div>
       </div>
       <div class="meta">${escapeHtml(row.workflow)} ${escapeHtml(row.runNumber)}</div>
-      ${tagCell}
+      <div class="${tagClass}">${escapeHtml(status)}</div>
       <div class="meta">${escapeHtml(detail)}</div>
       ${row.url ? `<a class="open-link" href="${escapeHtml(row.url)}" target="_blank" rel="noreferrer">Open Run</a>` : ""}
     </article>
   `;
-}
-
-function renderFailedCdResolutionTag(row) {
-  const resolved = row.resolvedBy;
-  if (resolved && resolved.runNumber) {
-    const label = `Resolved by ${resolved.runNumber}`;
-    if (resolved.url) {
-      return `<a class="tag tag-success tag-resolved" href="${escapeHtml(resolved.url)}" target="_blank" rel="noreferrer" title="Superseded by a newer successful run">${escapeHtml(label)}</a>`;
-    }
-    return `<span class="tag tag-success tag-resolved" title="Superseded by a newer successful run">${escapeHtml(label)}</span>`;
-  }
-  return `<span class="tag tag-danger tag-still-failing" title="No newer successful run on this workflow yet">Still failing</span>`;
 }
 
 function statusClass(status) {

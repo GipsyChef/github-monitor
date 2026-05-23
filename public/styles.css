@@ -380,8 +380,6 @@ button.metric.active::before { width: 4px; }
 }
 
 .metric-sub-warning { color: var(--amber); }
-.metric-sub-danger { color: var(--red); }
-.metric-sub-muted { color: var(--muted); }
 .metric-conflict strong { color: var(--red); }
 .metric-conflict[disabled] strong,
 .metric-conflict strong:empty::before { color: var(--ink); }
@@ -756,8 +754,6 @@ button.metric.active::before { width: 4px; }
   color: color-mix(in srgb, var(--amber) 70%, var(--ink));
   border-color: color-mix(in srgb, var(--amber) 32%, transparent);
 }
-a.tag-resolved { text-decoration: none; }
-a.tag-resolved:hover { filter: brightness(1.05); }
 
 .row-actions {
   display: inline-flex;

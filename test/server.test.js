@@ -685,10 +685,10 @@ test("dashboard scoreboard surfaces skipped CD runs without a new lane", () => {
   assert.match(indexHtml, /class="metric metric-green"[\s\S]*?id="metricFinishedCdSub"/);
 });
 
-test("dashboard scoreboard exposes a Failed CD subtitle and dot for still-failing vs resolved", () => {
-  assert.match(indexHtml, /id="metricFailedCdSub"/);
+test("Failed CD nav dot has its own id so the rail can flag the still-failing state", () => {
   assert.match(indexHtml, /id="navFailedCdDot"/);
-  assert.match(indexHtml, /class="metric metric-ink"[\s\S]*?id="metricFailedCdSub"/);
+  // Subtitle was removed when the Failed CD list became "still failing only" — its dom node should not return.
+  assert.equal(/id="metricFailedCdSub"/.test(indexHtml), false);
 });
 
 test("failed CD runs are surfaced even when a newer completed run displaces the latest entry", () => {
