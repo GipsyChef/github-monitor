@@ -40,7 +40,10 @@ The App is yours: each operator stands up their own. The project does not run a 
    | Permission | Access | Why |
    | --- | --- | --- |
    | Actions | Read-only | Workflow runs, runners |
+   | Checks | Read-only | CheckRun data in the PR `statusCheckRollup` GraphQL field |
+   | Commit statuses | Read-only | Legacy StatusContext data in the PR `statusCheckRollup` GraphQL field |
    | Contents | Read & write | Read commits, trees, file content; delete merged PR head branches |
+   | Deployments | Read-only | Running deployments view |
    | Metadata | Read-only | Mandatory; repository discovery |
    | Pull requests | Read & write | List PRs; merge or close PRs from the dashboard |
 
