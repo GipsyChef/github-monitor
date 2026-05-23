@@ -18,8 +18,10 @@ The app runs only on your machine. It talks directly to GitHub's REST and GraphQ
 Prerequisites:
 
 - Node.js 22 or newer
-- A GitHub token exposed as `GITHUB_TOKEN` or `GH_TOKEN`
-- Or GitHub CLI authenticated locally with `gh auth login`
+- One of the following authentication paths:
+  - A GitHub token exposed as `GITHUB_TOKEN` or `GH_TOKEN`
+  - GitHub CLI authenticated locally with `gh auth login`
+  - A GitHub App with the variables `GITHUB_APP_ID` and `GITHUB_APP_PRIVATE_KEY_PATH` configured. See [docs/github-app-setup.md](docs/github-app-setup.md) for setup and quota trade-offs.
 
 Install from GitHub:
 
@@ -94,7 +96,7 @@ The merge action is intentionally guarded: before merging, the server re-checks 
 - Frontend: dependency-free HTML/CSS/JavaScript
 - Data source: direct GitHub REST and GraphQL API calls
 
-This intentionally avoids storing GitHub tokens, adding a database, or introducing app auth. The local server reads `GITHUB_TOKEN` or `GH_TOKEN`; if neither is set, it uses `gh auth token` once to discover your existing local token. Merging PRs from the dashboard uses the same token and requires write access to the target repository.
+This intentionally avoids storing GitHub tokens or adding a database. The local server reads `GITHUB_TOKEN` or `GH_TOKEN`; if neither is set, it uses `gh auth token` once to discover your existing local token. Optionally, the server can authenticate as a GitHub App you control by setting `GITHUB_APP_ID` and `GITHUB_APP_PRIVATE_KEY_PATH` instead — see [docs/github-app-setup.md](docs/github-app-setup.md). Merging PRs from the dashboard uses the active credential and requires write access to the target repository.
 
 ## Status
 
@@ -105,12 +107,15 @@ GitHub Monitor is a local-first utility. It is not designed as a hosted multi-us
 - Node.js 22+
 - A GitHub token with access to the repositories you want to scan, provided as `GITHUB_TOKEN` or `GH_TOKEN`
 - Optional fallback: GitHub CLI authenticated locally, so the server can read `gh auth token`
+- Optional alternative to PAT: a GitHub App you own, configured via `GITHUB_APP_ID` and `GITHUB_APP_PRIVATE_KEY_PATH`. See [docs/github-app-setup.md](docs/github-app-setup.md).
 
 Recommended token scopes depend on what you want to see:
 
 - Read-only PR and Actions monitoring needs repository read access.
 - Runner visibility requires Actions runner access for the owner or repository.
 - Merging PRs requires write access to the target repository.
+
+GitHub App permissions for the equivalent capabilities are documented in [docs/github-app-setup.md](docs/github-app-setup.md).
 
 Check CLI fallback auth:
 
@@ -170,9 +175,9 @@ Merge requests must include JSON like `{"repo":"owner/name","number":123}`. The 
 
 ## Security
 
-The server binds to `127.0.0.1` and should stay on a trusted local machine. It uses your GitHub token for API calls and for merges triggered from the dashboard, so do not expose it to an untrusted network.
+The server binds to `127.0.0.1` and should stay on a trusted local machine. It uses your GitHub token (or GitHub App installation tokens) for API calls and for merges triggered from the dashboard, so do not expose it to an untrusted network.
 
-Never commit `.env` files, real tokens, screenshots with private repository data, or logs containing private repository names.
+Never commit `.env` files, real tokens, GitHub App private keys (`*.pem`), screenshots with private repository data, or logs containing private repository names. Store GitHub App private keys outside this repository with file mode `0600` and treat them as credentials of equal sensitivity to the PAT they replace.
 
 ## Support
 

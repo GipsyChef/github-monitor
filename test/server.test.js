@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { createVerify, generateKeyPairSync } from "node:crypto";
 
 import {
   SECURITY_HEADERS,
@@ -23,6 +24,10 @@ import {
   applyConditionalHeaders,
   takeCachedConditionalResponse,
   storeConditionalResponse,
+  extractOwnerFromPath,
+  buildAppJwtPayload,
+  signAppJwt,
+  installationTokenIsValid,
   server
 } from "../server.js";
 
@@ -815,4 +820,67 @@ test("isBackendUrl accurately identifies backend and API subdomains", () => {
   assert.equal(isBackendUrl("https://vectraseo.com"), false);
   assert.equal(isBackendUrl(""), false);
   assert.equal(isBackendUrl(null), false);
+});
+
+test("extractOwnerFromPath returns the owner for /repos, /orgs, /users paths and null elsewhere", () => {
+  assert.equal(extractOwnerFromPath("/repos/GipsyChef/agentdraft/pulls"), "GipsyChef");
+  assert.equal(extractOwnerFromPath("/repos/GipsyChef/agentdraft/git/refs/heads/main"), "GipsyChef");
+  assert.equal(extractOwnerFromPath("/orgs/GipsyChef/actions/runners"), "GipsyChef");
+  assert.equal(extractOwnerFromPath("/users/octocat/events"), "octocat");
+  // Owner-less paths.
+  assert.equal(extractOwnerFromPath("/search/issues"), null);
+  assert.equal(extractOwnerFromPath("/user"), null);
+  assert.equal(extractOwnerFromPath("/installation/repositories"), null);
+  assert.equal(extractOwnerFromPath("/graphql"), null);
+  assert.equal(extractOwnerFromPath(""), null);
+  assert.equal(extractOwnerFromPath(null), null);
+  // Full URLs to api.github.com are honored; other hosts are not.
+  assert.equal(extractOwnerFromPath("https://api.github.com/repos/GipsyChef/nightlamp/pulls/1"), "GipsyChef");
+  assert.equal(extractOwnerFromPath("https://api.github.com/graphql"), null);
+  assert.equal(extractOwnerFromPath("https://example.com/repos/foo/bar"), null);
+});
+
+test("buildAppJwtPayload uses the documented claim shape and 9-minute exp", () => {
+  const payload = buildAppJwtPayload("123456", 1_700_000_000);
+  assert.equal(payload.iss, "123456");
+  assert.equal(payload.iat, 1_700_000_000 - 60);
+  assert.equal(payload.exp, 1_700_000_000 + 540);
+  // App ID always stringified — GitHub accepts string or number, we normalize.
+  assert.equal(typeof buildAppJwtPayload(99, 0).iss, "string");
+});
+
+test("signAppJwt produces a verifiable RS256 JWT", () => {
+  const { publicKey, privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+  const privateKeyPem = privateKey.export({ type: "pkcs8", format: "pem" });
+  const jwt = signAppJwt({ appId: "42", privateKey: privateKeyPem, nowSeconds: 1_700_000_000 });
+  const [encodedHeader, encodedPayload, signature] = jwt.split(".");
+  // Three parts, all base64url, no padding.
+  assert.equal(jwt.split(".").length, 3);
+  assert.ok(!encodedHeader.includes("="));
+  assert.ok(!signature.includes("="));
+  // Header claims the RS256 algorithm.
+  const header = JSON.parse(Buffer.from(encodedHeader, "base64url").toString("utf8"));
+  assert.equal(header.alg, "RS256");
+  assert.equal(header.typ, "JWT");
+  // Payload survives a round-trip and matches buildAppJwtPayload.
+  const payload = JSON.parse(Buffer.from(encodedPayload, "base64url").toString("utf8"));
+  assert.deepEqual(payload, buildAppJwtPayload("42", 1_700_000_000));
+  // Signature verifies against the public key.
+  const verifier = createVerify("RSA-SHA256");
+  verifier.update(`${encodedHeader}.${encodedPayload}`);
+  assert.equal(verifier.verify(publicKey, signature, "base64url"), true);
+});
+
+test("installationTokenIsValid requires a 90-second safety margin before expiry", () => {
+  const now = 1_700_000_000;
+  assert.equal(installationTokenIsValid(null, now), false);
+  assert.equal(installationTokenIsValid(undefined, now), false);
+  // Fresh token: 1 hour out.
+  assert.equal(installationTokenIsValid({ token: "x", expiresAt: now + 3600 }, now), true);
+  // Just past the 90s safety margin: still valid (91s of headroom).
+  assert.equal(installationTokenIsValid({ token: "x", expiresAt: now + 91 }, now), true);
+  // Right at the margin: not valid (refresh proactively).
+  assert.equal(installationTokenIsValid({ token: "x", expiresAt: now + 90 }, now), false);
+  // Already expired.
+  assert.equal(installationTokenIsValid({ token: "x", expiresAt: now - 1 }, now), false);
 });
