@@ -26,6 +26,35 @@
             <button class="segment" type="button" data-mode="owned" aria-pressed="false">Owned</button>
             <button class="segment" type="button" data-mode="mine" aria-pressed="false">Mine</button>
           </div>
+          <div class="owner-picker" id="ownerPicker">
+            <button
+              id="ownerPickerToggle"
+              class="owner-picker-toggle"
+              type="button"
+              aria-haspopup="dialog"
+              aria-expanded="false"
+              aria-controls="ownerPickerPanel"
+              title="Limit dashboard scope to specific accounts"
+            >
+              <span class="owner-picker-label">Accounts</span>
+              <span id="ownerPickerSummary" class="owner-picker-summary">All</span>
+            </button>
+            <div
+              id="ownerPickerPanel"
+              class="owner-picker-panel hidden"
+              role="dialog"
+              aria-modal="false"
+              aria-label="Account scope"
+              aria-hidden="true"
+            >
+              <p class="owner-picker-heading">Show PRs and CD from</p>
+              <div id="ownerPickerList" class="owner-picker-list" role="list"></div>
+              <div class="owner-picker-actions">
+                <button id="ownerPickerAll" class="owner-picker-action" type="button">All accounts</button>
+                <button id="ownerPickerClose" class="owner-picker-action owner-picker-action-primary" type="button">Done</button>
+              </div>
+            </div>
+          </div>
           <label class="switch" title="Include continuous-deployment workflows">
             <input id="includeCd" type="checkbox" checked />
             <span>CD</span>

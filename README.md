@@ -90,6 +90,8 @@ There are currently no runtime npm dependencies beyond Node.js itself; `npm ci` 
 
 The merge action is intentionally guarded: before merging, the server re-checks the PR and rejects drafts, conflicts, failing checks, running checks, and no-CI PRs that GitHub does not currently report as mergeable. No-CI PRs that are mergeable can be merged manually. After a successful merge, the server deletes the PR head branch. Auto merge is off by default; when enabled, the server monitors eligible passing PRs with completed checks in the selected scope, counts them down for 15 seconds, and runs the same guarded merge action even if the browser tab is not active. PRs can also be closed from the dashboard regardless of CI state.
 
+If you run the server under a GitHub App and a target repository has a "Restrict who can push" branch protection rule on its merge target, the App must be in that rule's allowlist or merge calls return `You're not authorized to push to this branch.` See [docs/github-app-setup.md](docs/github-app-setup.md#step-6--allow-the-app-through-branch-protection-push-restrictions).
+
 ## Stack
 
 - Backend: dependency-free Node HTTP server
