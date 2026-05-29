@@ -1,207 +1,187 @@
 # GitHub Monitor
 
-GitHub Monitor is a local dashboard for keeping track of open pull requests, CI status, CD workflows, deployments, and self-hosted runner activity across your GitHub account and organizations.
+**One local dashboard for every open PR, CI run, deploy, and self-hosted runner across all your GitHub repos and orgs.**
 
-It is built for the common maintainer problem: you have work spread across several repositories, browser tabs, Actions pages, and notification streams, and you need one place that answers:
+[![CI](https://github.com/GipsyChef/github-monitor/actions/workflows/ci.yml/badge.svg)](https://github.com/GipsyChef/github-monitor/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Node.js >= 22](https://img.shields.io/badge/node-%3E%3D22-brightgreen.svg)](https://nodejs.org)
+[![Dependencies: zero runtime](https://img.shields.io/badge/runtime%20deps-0-success.svg)](package.json)
 
-- Which PRs are failing?
-- Which PRs are still running checks?
-- Which passing PRs are ready to merge?
-- Which deploy or release workflows are running or recently failed?
-- Are any self-hosted runners busy?
-- Is GitHub API quota getting tight?
+GitHub Monitor is a local-first dashboard built for maintainers and teams whose work is scattered across many repos and orgs. It solves the tab-juggling problem — browser tabs, Actions pages, and notification streams — so you can see merge-readiness and CI/CD state faster, in one place. It runs on `127.0.0.1`, talks directly to GitHub's REST and GraphQL APIs, stores **no token** and **no database**, and answers the questions a busy maintainer actually asks:
 
-The app runs only on your machine. It talks directly to GitHub's REST and GraphQL APIs, stores no GitHub token, and keeps notification history in browser localStorage.
+- Which PRs are **failing**, **still running checks**, or **green and ready to merge**?
+- Which **deploy / release** workflows are running or recently failed?
+- Are any **self-hosted runners** busy?
+- Is my **GitHub API quota** getting tight?
 
-## Quick Start
+![GitHub Monitor dashboard](docs/screenshot.png)
 
-Prerequisites:
+> The dashboard UI is titled **PR Command Deck** — that's the in-app name for GitHub Monitor.
 
-- Node.js 22 or newer
-- One of the following authentication paths:
-  - A GitHub token exposed as `GITHUB_TOKEN` or `GH_TOKEN`
-  - GitHub CLI authenticated locally with `gh auth login`
-  - A GitHub App with the variables `GITHUB_APP_ID` and `GITHUB_APP_PRIVATE_KEY_PATH` configured. See [docs/github-app-setup.md](docs/github-app-setup.md) for setup and quota trade-offs.
+## At a glance
 
-Install from GitHub:
+| | |
+|---|---|
+| **What** | Local-first dashboard for GitHub PRs, CI, CD, deployments, and runners |
+| **Who** | Maintainers and teams with work spread across many repos and orgs |
+| **Runs** | On your machine, bound to `127.0.0.1` — not a hosted service |
+| **Stack** | Dependency-free Node HTTP server + vanilla HTML/CSS/JS |
+| **Stores** | Nothing server-side; notification history lives in browser `localStorage` |
+| **Auth** | Personal token, `gh` CLI token, or a GitHub App you own |
+| **License** | MIT |
 
-```bash
-git clone https://github.com/GipsyChef/github-monitor.git
-cd github-monitor
-npm ci
-```
+## Is this for you?
 
-Start the dashboard:
+**✅ Use this when**
 
-```bash
-npm start
-```
+- You maintain or review across several repositories and orgs at once.
+- You want CI/CD state and merge-readiness in one glance instead of many tabs.
+- You'd rather run a small local tool than wire up a hosted service or grant a third party your token.
 
-Open:
+**❌ Look elsewhere if**
 
-```text
-http://127.0.0.1:4177
-```
+- You need a hosted, multi-user, or team-shared dashboard (this is local-first by design).
+- You want long-term metrics, dashboards, or alerting history (it shows live state, not analytics).
+- You can't run Node.js 22+ locally.
 
-Use an explicit token:
+## Quick start
 
-```bash
-GITHUB_TOKEN=<your-token> npm start
-```
-
-Use another port:
-
-```bash
-PORT=4180 npm start
-```
-
-For a guided local launch that checks Node.js, GitHub CLI auth, and port availability:
-
-```bash
-npm run dev
-```
-
-## Install
-
-GitHub Monitor is distributed as source code. Clone the repository and install the locked npm dependency graph:
+**Prerequisites:** Node.js 22+ and one auth path (a `GITHUB_TOKEN`, a logged-in `gh` CLI, or a GitHub App — see [Authentication](#authentication)).
 
 ```bash
 git clone https://github.com/GipsyChef/github-monitor.git
 cd github-monitor
-npm ci
+npm ci          # no runtime deps — just verifies the lockfile like CI does
+npm start       # serves the dashboard
 ```
 
-There are currently no runtime npm dependencies beyond Node.js itself; `npm ci` verifies the lockfile and prepares the project the same way CI does.
+Then open **<http://127.0.0.1:4177>**.
 
-## What It Shows
+Handy variants:
 
-- Open PRs from non-archived repositories, grouped by passing, no-CI, failing, running, and merge conflict states
-- Running non-CD GitHub Actions workflow runs, including jobs that are not currently represented by an open PR status rollup
-- Optional CD/deploy/release/publish workflow audit
-- CD runs that finished in the last 24 hours
-- Latest failed CD runs from the last 3 days
+```bash
+GITHUB_TOKEN=<your-token> npm start   # use an explicit token
+PORT=4180 npm start                   # use a different port
+npm run dev                           # guided launch: checks Node, gh auth, port, then opens the browser
+```
+
+Prefer a config file? Copy [`.env.example`](.env.example) to `.env` and fill in what you need.
+
+## Authentication
+
+Pick one path. The server never persists your credential.
+
+1. **Personal access token** — set `GITHUB_TOKEN` or `GH_TOKEN`.
+2. **GitHub CLI fallback** — if neither variable is set, the server runs `gh auth token` once to reuse your existing local login. Verify with `gh auth status`.
+3. **GitHub App you own** — set `GITHUB_APP_ID` and `GITHUB_APP_PRIVATE_KEY_PATH` for higher, per-installation quota. See **[docs/github-app-setup.md](docs/github-app-setup.md)** for setup and quota trade-offs.
+
+Token scopes you need depend on what you want to see:
+
+| Goal | Access required |
+|---|---|
+| Read-only PR & Actions monitoring | Repository read |
+| Self-hosted runner visibility | Actions runner access (owner or repo) |
+| Merging PRs from the dashboard | Write to the target repository |
+
+> GitHub App permissions for the equivalent capabilities are documented in [docs/github-app-setup.md](docs/github-app-setup.md).
+
+## What it shows
+
+- Open PRs from non-archived repositories, grouped by **passing**, **no-CI**, **failing**, **running**, and **merge-conflict** states
+- Running non-CD GitHub Actions workflow runs, including jobs not represented by an open-PR status rollup
+- Optional **CD/deploy/release/publish** workflow audit, plus CD runs finished in the last 24h and the latest failed CD runs from the last 3 days
 - Running GitHub deployments
-- Busy organization and optional repository-level self-hosted runners
-- GitHub API request count, remaining quota, and reset time
-- Adaptive next-refresh timing based on activity and API quota
-- Quota-aware refresh pausing when GitHub API quota is low, including a disabled manual refresh button until the reset window
+- Busy org and (optional) repository-level self-hosted runners
+- GitHub API request count, remaining quota, and reset time, with **adaptive next-refresh timing**
+- Quota-aware pausing: when quota runs low, auto-refresh pauses and the manual refresh button is disabled until the reset window
 - Browser notifications and an in-app inbox for CI/CD completions and new conflicts
-- Optional auto-merge countdown for passing PRs with completed checks
+- Optional **auto-merge** countdown for passing PRs with completed checks
 
-The merge action is intentionally guarded: before merging, the server re-checks the PR and rejects drafts, conflicts, failing checks, running checks, and no-CI PRs that GitHub does not currently report as mergeable. No-CI PRs that are mergeable can be merged manually. After a successful merge, the server deletes the PR head branch. Auto merge is off by default; when enabled, the server monitors eligible passing PRs with completed checks in the selected scope, counts them down for 15 seconds, and runs the same guarded merge action even if the browser tab is not active. PRs can also be closed from the dashboard regardless of CI state.
+## How it works
 
-If you run the server under a GitHub App and a target repository has a "Restrict who can push" branch protection rule on its merge target, the App must be in that rule's allowlist or merge calls return `You're not authorized to push to this branch.` See [docs/github-app-setup.md](docs/github-app-setup.md#step-6--allow-the-app-through-branch-protection-push-restrictions).
+```mermaid
+flowchart LR
+    Browser["Browser dashboard<br/>(vanilla HTML/CSS/JS)"]
+    Server["Local Node server<br/>127.0.0.1:4177<br/>(zero runtime deps)"]
+    GitHub["GitHub REST + GraphQL APIs"]
 
-## Stack
-
-- Backend: dependency-free Node HTTP server
-- Frontend: dependency-free HTML/CSS/JavaScript
-- Data source: direct GitHub REST and GraphQL API calls
-
-This intentionally avoids storing GitHub tokens or adding a database. The local server reads `GITHUB_TOKEN` or `GH_TOKEN`; if neither is set, it uses `gh auth token` once to discover your existing local token. Optionally, the server can authenticate as a GitHub App you control by setting `GITHUB_APP_ID` and `GITHUB_APP_PRIVATE_KEY_PATH` instead — see [docs/github-app-setup.md](docs/github-app-setup.md). Merging PRs from the dashboard uses the active credential and requires write access to the target repository.
-
-## Status
-
-GitHub Monitor is a local-first utility. It is not designed as a hosted multi-user service.
-
-## Prerequisites
-
-- Node.js 22+
-- A GitHub token with access to the repositories you want to scan, provided as `GITHUB_TOKEN` or `GH_TOKEN`
-- Optional fallback: GitHub CLI authenticated locally, so the server can read `gh auth token`
-- Optional alternative to PAT: a GitHub App you own, configured via `GITHUB_APP_ID` and `GITHUB_APP_PRIVATE_KEY_PATH`. See [docs/github-app-setup.md](docs/github-app-setup.md).
-
-Recommended token scopes depend on what you want to see:
-
-- Read-only PR and Actions monitoring needs repository read access.
-- Runner visibility requires Actions runner access for the owner or repository.
-- Merging PRs requires write access to the target repository.
-
-GitHub App permissions for the equivalent capabilities are documented in [docs/github-app-setup.md](docs/github-app-setup.md).
-
-Check CLI fallback auth:
-
-```bash
-gh auth status
+    Browser -->|"GET /api/status"| Server
+    Server -->|"your token / App install token"| GitHub
+    GitHub -->|"PRs, runs, deployments, runners,<br/>rate-limit headers"| Server
+    Server -->|"grouped state + next-refresh hint"| Browser
+    Browser -.->|"notification history"| LS["localStorage"]
 ```
 
-## Development
+- **Backend:** a single dependency-free Node HTTP server (`server.js`).
+- **Frontend:** dependency-free HTML/CSS/JavaScript in `public/`.
+- **No storage:** no database, no persisted token. The credential comes from `GITHUB_TOKEN`/`GH_TOKEN`, the `gh` CLI, or a GitHub App at request time.
 
-Run the syntax check:
+**Guarded merges.** Merging from the dashboard re-checks the PR server-side first and rejects drafts, conflicts, failing checks, running checks, and no-CI PRs that GitHub doesn't currently report as mergeable. No-CI PRs that *are* mergeable can be merged manually. After a successful merge the server deletes the PR head branch. Auto-merge is **off by default**; when enabled it counts eligible PRs down for 15 seconds — even if the tab isn't active — then runs the same guarded merge. PRs can also be closed from the dashboard regardless of CI state.
 
-```bash
-npm test
-```
+> Under a GitHub App, if a target repo has a "Restrict who can push" branch-protection rule on the merge target, the App must be in that rule's allowlist or merges fail with `You're not authorized to push to this branch.` See [docs/github-app-setup.md](docs/github-app-setup.md#step-6--allow-the-app-through-branch-protection-push-restrictions).
 
-Run the startup helper, which verifies Node.js, GitHub CLI auth, port availability, and opens the dashboard:
+**Adaptive refresh.** The server reads GitHub rate-limit headers on every response and returns the requests used, per-resource quota/remaining/reset, and a recommended next refresh time. The browser refreshes faster when PRs, CD actions, deployments, or runners are active, and slows down when things are quiet, expensive audits are on, or quota gets tight. Under GitHub App auth, each installation has its own quota bucket; the footer chip shows the *tightest* bucket and how many others exist (hover for the full breakdown). The notification inbox lives in `localStorage` and prunes entries older than 24h.
 
-```bash
-npm run dev
-```
+## Configuration
 
-## Dashboard Controls
+All optional except your chosen auth path. Set via environment or `.env`.
 
-- `All owners`: your repos plus all orgs returned by GitHub
-- `Owned`: repositories owned by your GitHub user
-- `Mine`: PRs authored by you
-- `CD audit`: scan CD/deploy/release/publish workflows, CD runs finished in the last 24 hours, failed latest CD runs, and running deployments
-- `Busy runners`: scan owner/org self-hosted runners
-- `Auto refresh`: schedules the next scan adaptively and shows a live countdown
-- `Auto merge`: when enabled, passing PRs with completed checks in the selected scope count down for 15 seconds on the server and then merge automatically unless clicked first
+| Variable | Purpose |
+|---|---|
+| `GITHUB_TOKEN` / `GH_TOKEN` | Personal access token for API calls and merges |
+| `GITHUB_APP_ID` | GitHub App ID (App auth path) |
+| `GITHUB_APP_PRIVATE_KEY_PATH` | Path to the App's private key (`0600`, kept outside the repo) |
+| `PORT` | Dashboard port (default `4177`) |
+| `OPEN_PRS_JOBS` | Parallelism for the open-PR scan |
+| `ETAG_CACHE_DISABLED` | Set to `1` to disable conditional-request caching (debugging) |
 
-## Adaptive Refresh
+### Dashboard controls
 
-The server records GitHub rate-limit headers from each REST and GraphQL response and returns:
-
-- GitHub requests used by the scan
-- Per-resource quota, remaining calls, and reset time
-- Under GitHub App auth: one bucket per installation, since each installation has its own independent quota. The chip in the footer shows the *tightest* bucket (lowest remaining-to-limit ratio) — the one that would throttle first — and notes how many other buckets exist; hover the chip for the full per-installation breakdown.
-- A recommended next refresh time
-
-The browser refreshes faster when PR checks, CD actions, deployments, or runners are active. It slows down when the dashboard is quiet, when expensive audit options are enabled, or when GitHub quota gets tight. When quota is low enough that another scan risks exhausting the GitHub API window, the dashboard pauses auto refresh, disables the manual refresh button, and waits until after GitHub's reset time before scanning again.
-
-The notification inbox is kept in localStorage for quick follow-up and prunes entries older than 24 hours.
+- **All owners** — your repos plus every org GitHub returns
+- **Owned** — repositories owned by your user
+- **Mine** — PRs you authored
+- **CD audit** — scan CD/deploy/release/publish workflows, recent CD runs, failed latest runs, and running deployments
+- **Busy runners** — scan owner/org self-hosted runners
+- **Auto refresh** — schedules the next scan adaptively with a live countdown
+- **Auto merge** — counts passing PRs (with completed checks) down for 15s, then merges
 
 ## API
 
 ```text
-GET /api/status?mode=all&includeCd=1&includeRunners=0&includeRepoRunners=0&jobs=4
-GET /api/runners/status?mode=all&includeRepoRunners=0&jobs=4
+GET  /api/status?mode=all&includeCd=1&includeRunners=0&includeRepoRunners=0&jobs=4
+GET  /api/runners/status?mode=all&includeRepoRunners=0&jobs=4
 POST /api/pull-request/merge
 POST /api/pull-request/close
-GET /api/health
+GET  /api/health
 ```
 
-`mode` can be `all`, `owned`, or `mine`.
-The runner status endpoint returns only busy self-hosted runners, using the same runner scan as the dashboard. Set `includeRepoRunners=1` to also scan repository-level runners.
-Merge requests must include JSON like `{"repo":"owner/name","number":123}`. The server re-checks the PR before merging, rejects drafts, conflicts, failing checks, running checks, and no-CI PRs that GitHub does not currently report as mergeable, then deletes the PR head branch after a successful merge. Close requests use the same JSON shape and close the PR without requiring CI.
+- `mode` is `all`, `owned`, or `mine`.
+- The runner endpoint returns only busy self-hosted runners; set `includeRepoRunners=1` to include repo-level runners.
+- Merge/close requests take JSON like `{"repo":"owner/name","number":123}`. Merge re-checks the PR (see [guarded merges](#how-it-works)) and deletes the head branch on success; close skips CI requirements.
 
 ## Security
 
-The server binds to `127.0.0.1` and should stay on a trusted local machine. It uses your GitHub token (or GitHub App installation tokens) for API calls and for merges triggered from the dashboard, so do not expose it to an untrusted network.
+The server binds to `127.0.0.1` and is meant for a trusted local machine. It uses your token (or App installation tokens) for API calls and dashboard-triggered merges, so **don't expose it to an untrusted network**.
 
-Never commit `.env` files, real tokens, GitHub App private keys (`*.pem`), screenshots with private repository data, or logs containing private repository names. Store GitHub App private keys outside this repository with file mode `0600` and treat them as credentials of equal sensitivity to the PAT they replace.
+Never commit `.env` files, real tokens, GitHub App private keys (`*.pem`), screenshots containing private repo data, or logs with private repo names. Store App private keys outside this repo with mode `0600` and treat them as sensitive as the PAT they replace.
 
-## Support
+To report a vulnerability, follow [SECURITY.md](SECURITY.md) — do not open a public issue.
 
-Use GitHub issues for reproducible bugs and focused feature requests. For suspected security vulnerabilities, follow [SECURITY.md](SECURITY.md) instead of opening a public issue.
+## Development
 
-This is a small local utility, so support is best effort. Hosted multi-user deployment support and debugging private repositories without a minimal reproduction are out of scope.
+```bash
+npm test     # node --test plus a syntax check (npm run check)
+npm run dev  # startup helper: verifies Node, gh auth, port, then opens the dashboard
+```
 
-See [SUPPORT.md](SUPPORT.md) for support boundaries and issue details to include.
+GitHub Monitor is distributed as source — there are no runtime npm dependencies, so `npm ci` simply verifies the lockfile.
 
-## Community
+## Contributing & support
 
-New contributors should start with [docs/COMMUNITY.md](docs/COMMUNITY.md). It explains the intended audience, good first contributions, support boundaries, security-sensitive areas, and maintainer expectations.
+New contributors should start with **[docs/COMMUNITY.md](docs/COMMUNITY.md)** (intended audience, good first contributions, support boundaries, security-sensitive areas). See also [CONTRIBUTING.md](CONTRIBUTING.md), [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md), and [SUPPORT.md](SUPPORT.md).
 
-## Notes
-
-Draft PRs with no CI checks are hidden. Non-draft PRs with no reported checks and no merge conflicts appear in the No CI view.
-
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md), [docs/COMMUNITY.md](docs/COMMUNITY.md), [SUPPORT.md](SUPPORT.md), [SECURITY.md](SECURITY.md), and [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
+This is a small local utility, so support is best-effort: use GitHub issues for reproducible bugs and focused feature requests. Hosted multi-user deployment and debugging private repos without a minimal reproduction are out of scope.
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+MIT — see [LICENSE](LICENSE).

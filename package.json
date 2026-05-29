@@ -18,7 +18,16 @@
     "pull-requests",
     "ci",
     "cd",
-    "dashboard"
+    "ci-cd",
+    "dashboard",
+    "github-actions",
+    "self-hosted-runners",
+    "deployments",
+    "devops",
+    "developer-tools",
+    "monitoring",
+    "local-first",
+    "zero-dependency"
   ],
   "files": [
     "public/",
