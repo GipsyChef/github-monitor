@@ -121,7 +121,7 @@ jobs:
           }
           NODE
 
-          if git ls-files | grep -E '(^|/)\.env($|\.)'; then
+          if git ls-files | grep -E '(^|/)\.env($|\.)' | grep -vE '(^|/)\.env\.(example|sample|template)$'; then
             echo "::error::.env files must not be tracked"
             exit 1
           fi
