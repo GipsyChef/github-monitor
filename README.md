@@ -44,7 +44,7 @@ GitHub Monitor is a local-first dashboard built for maintainers and teams whose 
 - You want long-term metrics, dashboards, or alerting history (it shows live state, not analytics).
 - You can't run Node.js 22+ locally.
 
-## Quick start
+## Quick Start
 
 **Prerequisites:** Node.js 22+ and one auth path (a `GITHUB_TOKEN`, a logged-in `gh` CLI, or a GitHub App — see [Authentication](#authentication)).
 
@@ -85,7 +85,7 @@ Token scopes you need depend on what you want to see:
 
 > GitHub App permissions for the equivalent capabilities are documented in [docs/github-app-setup.md](docs/github-app-setup.md).
 
-## What it shows
+## What It Shows
 
 - Open PRs from non-archived repositories, grouped by **passing**, **no-CI**, **failing**, **running**, and **merge-conflict** states
 - Running non-CD GitHub Actions workflow runs, including jobs not represented by an open-PR status rollup
