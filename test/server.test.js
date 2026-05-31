@@ -24,6 +24,7 @@ import {
   publicRouteFromFile,
   isBackendUrl,
   runOutcome,
+  selectFailedActionRuns,
   selectFailedCdRuns,
   findSupersedingSuccessfulRun,
   applyConditionalHeaders,
@@ -618,6 +619,20 @@ test("dashboard includes running non-CD workflow runs in CI running work", async
             html_url: "https://github.com/acme/app/actions/runs/42"
           },
           {
+            id: 45,
+            name: "ci",
+            path: ".github/workflows/ci.yml",
+            event: "push",
+            status: "completed",
+            conclusion: "failure",
+            created_at: "2026-05-18T20:03:00Z",
+            updated_at: new Date().toISOString(),
+            run_number: 45,
+            head_branch: "main",
+            display_title: "Merge pull request #12 from acme/fix",
+            html_url: "https://github.com/acme/app/actions/runs/45"
+          },
+          {
             name: "Deploy",
             path: ".github/workflows/deploy.yml",
             status: "in_progress",
@@ -640,6 +655,13 @@ test("dashboard includes running non-CD workflow runs in CI running work", async
         ]
       }, { headers });
     }
+    if (requestUrl.pathname === "/repos/acme/app/actions/runs/45/jobs") {
+      return Response.json({
+        jobs: [
+          { name: "engine — pytest", conclusion: "failure" }
+        ]
+      }, { headers });
+    }
 
     return Response.json({ message: "not found" }, { status: 404, headers });
   };
@@ -654,7 +676,23 @@ test("dashboard includes running non-CD workflow runs in CI running work", async
     const data = await response.json();
 
     assert.equal(response.status, 200);
+    assert.equal(data.summary.failingPrs, 1);
     assert.equal(data.summary.runningPrs, 1);
+    assert.deepEqual(data.actions.failed, [
+      {
+        kind: "workflowRun",
+        createdAt: data.actions.failed[0].createdAt,
+        repo: "acme/app",
+        workflow: "ci",
+        runNumber: "#45",
+        status: "completed",
+        conclusion: "failure",
+        branch: "main",
+        title: "Merge pull request #12 from acme/fix",
+        url: "https://github.com/acme/app/actions/runs/45",
+        failureReason: "engine — pytest failed"
+      }
+    ]);
     assert.deepEqual(data.actions.running, [
       {
         kind: "workflowRun",
@@ -674,6 +712,77 @@ test("dashboard includes running non-CD workflow runs in CI running work", async
     if (previousToken == null) delete process.env.GITHUB_TOKEN;
     else process.env.GITHUB_TOKEN = previousToken;
   }
+});
+
+test("failed non-CD workflow runs stay in failing CI until a newer same-lane success resolves them", () => {
+  const now = Date.parse("2026-05-23T19:25:00Z");
+  const minutesAgo = (mins) => new Date(now - mins * 60 * 1000).toISOString();
+  const daysAgo = (days) => new Date(now - days * 24 * 60 * 60 * 1000).toISOString();
+  const runs = [
+    {
+      id: 7,
+      name: "ci",
+      path: ".github/workflows/ci.yml",
+      event: "pull_request",
+      status: "completed",
+      conclusion: "failure",
+      head_branch: "feature",
+      updated_at: minutesAgo(1)
+    },
+    {
+      id: 6,
+      name: "Deploy",
+      path: ".github/workflows/deploy.yml",
+      event: "push",
+      status: "completed",
+      conclusion: "failure",
+      head_branch: "main",
+      updated_at: minutesAgo(2)
+    },
+    {
+      id: 5,
+      name: "ci",
+      path: ".github/workflows/ci.yml",
+      event: "push",
+      status: "completed",
+      conclusion: "success",
+      head_branch: "release",
+      updated_at: minutesAgo(3)
+    },
+    {
+      id: 4,
+      name: "ci",
+      path: ".github/workflows/ci.yml",
+      event: "push",
+      status: "completed",
+      conclusion: "failure",
+      head_branch: "release",
+      updated_at: minutesAgo(4)
+    },
+    {
+      id: 3,
+      name: "ci",
+      path: ".github/workflows/ci.yml",
+      event: "push",
+      status: "completed",
+      conclusion: "failure",
+      head_branch: "main",
+      updated_at: minutesAgo(5)
+    },
+    {
+      id: 2,
+      name: "ci",
+      path: ".github/workflows/ci.yml",
+      event: "push",
+      status: "completed",
+      conclusion: "failure",
+      head_branch: "main",
+      updated_at: daysAgo(8)
+    }
+  ];
+
+  const failed = selectFailedActionRuns(runs, { now });
+  assert.deepEqual(failed.map((run) => run.id), [3]);
 });
 
 test("workflow run conclusions are classified into actionable outcomes", () => {

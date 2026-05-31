@@ -147,6 +147,7 @@ const PR_BY_NUMBER_GRAPHQL = `
 `;
 
 const CD_WORKFLOW_PATTERN = /(^|[^A-Za-z0-9])(cd|deploy|deployment|release|publish)([^A-Za-z0-9]|$)/i;
+const FAILED_ACTION_MAX_AGE_MS = 3 * 24 * 60 * 60 * 1000;
 const FAILED_CD_MAX_AGE_MS = 3 * 24 * 60 * 60 * 1000;
 const FINISHED_CD_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const CHANGE_FILE_LINK_LIMIT = 14;
@@ -822,6 +823,11 @@ function isWithinFailedCdWindow(value, now = Date.now()) {
   return Number.isFinite(time) && now - time <= FAILED_CD_MAX_AGE_MS;
 }
 
+function isWithinFailedActionWindow(value, now = Date.now()) {
+  const time = new Date(value).getTime();
+  return Number.isFinite(time) && now - time <= FAILED_ACTION_MAX_AGE_MS;
+}
+
 function selectFailedCdRuns(runs, { now = Date.now() } = {}) {
   if (!Array.isArray(runs)) return [];
   return runs.filter((run) => {
@@ -839,6 +845,36 @@ function findSupersedingSuccessfulRun(completedRunsNewestFirst, failedRun) {
     if (runOutcome(completedRunsNewestFirst[i]) === "success") return completedRunsNewestFirst[i];
   }
   return null;
+}
+
+function sameWorkflowRunLane(left, right) {
+  if (!left || !right) return false;
+  const leftWorkflow = left.path || left.name || "";
+  const rightWorkflow = right.path || right.name || "";
+  return leftWorkflow === rightWorkflow && (left.head_branch || "") === (right.head_branch || "");
+}
+
+function findSupersedingSuccessfulActionRun(completedRunsNewestFirst, failedRun) {
+  if (!Array.isArray(completedRunsNewestFirst) || !failedRun) return null;
+  const idx = completedRunsNewestFirst.indexOf(failedRun);
+  if (idx <= 0) return null;
+  for (let i = idx - 1; i >= 0; i--) {
+    const candidate = completedRunsNewestFirst[i];
+    if (sameWorkflowRunLane(candidate, failedRun) && runOutcome(candidate) === "success") return candidate;
+  }
+  return null;
+}
+
+function selectFailedActionRuns(runs, { now = Date.now() } = {}) {
+  if (!Array.isArray(runs)) return [];
+  const completedRuns = runs.filter((run) => run?.status === "completed");
+  return completedRuns.filter((run) => {
+    if (isCdWorkflowRun(run)) return false;
+    if (run.event === "pull_request" || run.event === "pull_request_target") return false;
+    if (!FAILED_RUN_CONCLUSIONS.has(run.conclusion)) return false;
+    if (!isWithinFailedActionWindow(run.updated_at || run.created_at, now)) return false;
+    return !findSupersedingSuccessfulActionRun(completedRuns, run);
+  });
 }
 
 function isWithinFinishedCdWindow(value) {
@@ -1970,12 +2006,12 @@ async function fetchCdForRepo(repo) {
   return { failed, finished, running };
 }
 
-async function fetchRunningActionsForRepo(repo) {
-  return cachedGithubValue(`running-actions:${repo}`, RUNNING_ACTION_CACHE_TTL_MS, async () => {
+async function fetchActionsForRepo(repo) {
+  return cachedGithubValue(`actions:${repo}`, RUNNING_ACTION_CACHE_TTL_MS, async () => {
     try {
       const json = await githubRequest(`/repos/${repo}/actions/runs`, { query: { per_page: 20 } });
       const runs = json?.workflow_runs || [];
-      return runs
+      const running = runs
         .filter((run) => RUNNING_RUN_STATUSES.has(run.status))
         .filter((run) => !isCdWorkflowRun(run))
         .map((run) => ({
@@ -1989,8 +2025,22 @@ async function fetchRunningActionsForRepo(repo) {
           title: run.display_title || run.name || "",
           url: run.html_url || ""
         }));
+      const failed = await mapLimit(selectFailedActionRuns(runs), 4, async (run) => ({
+        kind: "workflowRun",
+        createdAt: run.updated_at || run.created_at || "",
+        repo,
+        workflow: run.name || "Workflow",
+        runNumber: `#${run.run_number}`,
+        status: run.status || "",
+        conclusion: run.conclusion || "",
+        branch: run.head_branch || "",
+        title: run.display_title || run.name || "",
+        url: run.html_url || "",
+        failureReason: await fetchWorkflowRunFailureReason(repo, run)
+      }));
+      return { failed, running };
     } catch {
-      return [];
+      return { failed: [], running: [] };
     }
   });
 }
@@ -2119,6 +2169,7 @@ async function buildDashboardData(requestUrl) {
   let failedCd = [];
   let finishedCd = [];
   let runningCd = [];
+  let failedActions = [];
   let runningActions = [];
   let runningDeployments = [];
   let busyRunners = [];
@@ -2126,8 +2177,9 @@ async function buildDashboardData(requestUrl) {
   repos = await listRepos({ mode, me, pullRequests, jobs, owners });
 
   if (repos.length) {
-    const actionGroups = await mapLimit(repos, jobs, fetchRunningActionsForRepo);
-    runningActions = uniqueBy(actionGroups.flat(), (run) => run.url || JSON.stringify(run));
+    const actionGroups = await mapLimit(repos, jobs, fetchActionsForRepo);
+    failedActions = uniqueBy(actionGroups.flatMap((group) => group.failed), (run) => run.url || JSON.stringify(run));
+    runningActions = uniqueBy(actionGroups.flatMap((group) => group.running), (run) => run.url || JSON.stringify(run));
   }
 
   if (includeCd && repos.length) {
@@ -2151,7 +2203,7 @@ async function buildDashboardData(requestUrl) {
     repos: repos.length || new Set(pullRequests.map((pr) => pr.repo)).size,
     passingPrs: prGroups.pass.length,
     noCiPrs: prGroups.noCi.length,
-    failingPrs: prGroups.fail.length,
+    failingPrs: prGroups.fail.length + failedActions.length,
     runningPrs: prGroups.running.length + runningActions.length,
     conflictPrs: prGroups.conflicts.length,
     runningCd: runningCd.length,
@@ -2175,6 +2227,7 @@ async function buildDashboardData(requestUrl) {
     refresh: recommendRefresh(summary, { mode, jobs, includeCd, includeRunners, includeRepoRunners }, rateLimit),
     pullRequests: prGroups,
     actions: {
+      failed: failedActions.sort(sortByCreatedDesc),
       running: runningActions.sort(sortByCreatedDesc)
     },
     cd: {
@@ -2662,6 +2715,7 @@ export {
   scanMetrics,
   recommendRefresh,
   runOutcome,
+  selectFailedActionRuns,
   selectFailedCdRuns,
   findSupersedingSuccessfulRun,
   applyConditionalHeaders,

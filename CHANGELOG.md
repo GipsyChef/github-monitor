@@ -33,6 +33,7 @@ This project follows [Semantic Versioning](https://semver.org/) where practical.
 
 ### Fixed
 
+- Failing CI now includes recent failed non-CD GitHub Actions runs, not only failed open-PR check rollups. This catches push-to-main CI failures such as merge-commit regressions and keeps them visible until a newer successful run in the same workflow and branch resolves them.
 - Failed CD now surfaces every workflow run that failed within the 3-day window, including failures that were superseded by a newer completed run. The previous "latest run only" logic silently hid failures whenever a follow-up redeploy succeeded or was skipped, while Finished CD still listed them as `FAILURE` — making the two views disagree on whether any deploys had failed.
 - Each Failed CD row now indicates whether it is still failing or has been resolved by a newer successful run, and the Failed CD scoreboard chip distinguishes "N still failing" from "all resolved".
 - Auto merge button now updates as soon as the server completes the merge, instead of staying stuck on "Merging" until the next periodic refresh.
