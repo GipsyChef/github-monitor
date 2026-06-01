@@ -424,6 +424,10 @@ function traceKey(row) {
   return row?.id || `${row?.repo || ""}#${row?.prNumber || row?.number || ""}`;
 }
 
+function traceDismissKey(row) {
+  return `trace:${traceKey(row)}`;
+}
+
 function flattenTraces(traces) {
   return [
     ...(traces?.flagged || []),
@@ -1128,13 +1132,38 @@ async function refresh({ source = "manual" } = {}) {
 }
 
 function updateTabTitle(data) {
-  const failing = data?.summary?.failingPrs ?? 0;
+  const failing = adjustedSummary(data).failingPrs ?? 0;
   document.title = failing > 0 ? `(${failing}) PR Command Deck` : "PR Command Deck";
 }
 
+// Counts how many rows in a lane the user has locally dismissed.
+function dismissedInLane(rows, keyFn) {
+  if (!Array.isArray(rows)) return 0;
+  return rows.reduce((count, row) => {
+    const key = keyFn(row);
+    return count + (key && isDismissed(key) ? 1 : 0);
+  }, 0);
+}
+
+// The scoreboard tiles and rail counts come from the server summary, which has
+// no knowledge of locally dismissed rows. Subtract the user's dismissals so a
+// dismissed item also drops its tile/nav count — keeping the number in sync with
+// the filtered list. Only lanes with dismissable rows are adjusted (see
+// dismissKey): Failing CI workflow runs, and flagged/unknown pipeline traces.
+function adjustedSummary(data) {
+  const summary = (data && data.summary) || {};
+  return {
+    ...summary,
+    failingPrs: Math.max(0, (summary.failingPrs ?? 0) - dismissedInLane(data?.actions?.failed, actionKey)),
+    flaggedJourneys: Math.max(0, (summary.flaggedJourneys ?? 0) - dismissedInLane(data?.traces?.flagged, traceDismissKey)),
+    tracingUnknown: Math.max(0, (summary.tracingUnknown ?? 0) - dismissedInLane(data?.traces?.unknown, traceDismissKey))
+  };
+}
+
 function renderMetrics(data) {
+  const counts = adjustedSummary(data);
   for (const [key, id] of Object.entries(metricIds)) {
-    document.querySelector(`#${id}`).textContent = data.summary[key] ?? 0;
+    document.querySelector(`#${id}`).textContent = counts[key] ?? 0;
   }
   const skippedCd = Number(data.summary.skippedCd || 0);
   const finishedCdSub = document.querySelector("#metricFinishedCdSub");
@@ -1163,7 +1192,7 @@ function renderMetrics(data) {
   const navCounts = {
     pass: data.summary.passingPrs,
     noCi: data.summary.noCiPrs,
-    fail: data.summary.failingPrs,
+    fail: counts.failingPrs,
     conflicts: data.summary.conflictPrs,
     running: data.summary.runningPrs,
     runningCd: data.summary.runningCd,
@@ -1171,7 +1200,7 @@ function renderMetrics(data) {
     deployments: data.summary.runningDeployments,
     runners: data.summary.busyRunners,
     failedCd: data.summary.failedCd,
-    pipelineTraces: data.summary.flaggedJourneys
+    pipelineTraces: counts.flaggedJourneys
   };
   for (const [key, id] of Object.entries(navIds)) {
     document.querySelector(`#${id}`).textContent = navCounts[key] ?? 0;
@@ -1254,7 +1283,7 @@ function dismissKey(row) {
   if (!row) return null;
   if (state.view === "fail" && row.kind === "workflowRun") return actionKey(row);
   if (state.view === "pipelineTraces" && (row.status === "flagged" || row.status === "unknown")) {
-    return `trace:${traceKey(row)}`;
+    return traceDismissKey(row);
   }
   return null;
 }
