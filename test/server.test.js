@@ -11,6 +11,7 @@ import {
   extractProductionUrlsFromText,
   groupPullRequests,
   isProductionTargetScanPath,
+  productionTargetFromCodeFiles,
   isAutoMergeCandidate,
   mergeBlockReason,
   openPullRequestSearchQuery,
@@ -256,6 +257,39 @@ test("production target scan finds deployable URLs in project code", () => {
 
   assert.equal(best.url, "https://safespendplan.com/");
   assert.equal(best.source, "infra/cdk/app-stack.ts");
+});
+
+test("productionTargetFromCodeFiles honors source precedence", () => {
+  // package.json homepage wins over everything else.
+  assert.deepEqual(
+    productionTargetFromCodeFiles({
+      "package.json": JSON.stringify({ homepage: "https://app.safespendplan.com" }),
+      CNAME: "fallback.acme-app.io",
+      "vercel.json": JSON.stringify({ url: "https://nope.acme-app.io" })
+    }),
+    { url: "https://app.safespendplan.com/", environment: "production", source: "package.json homepage" }
+  );
+
+  // CNAME wins over framework config when no package.json homepage.
+  assert.deepEqual(
+    productionTargetFromCodeFiles({
+      "package.json": JSON.stringify({ name: "x" }),
+      "public/CNAME": "site.acme-app.io",
+      "netlify.toml": "url = \"https://other.acme-app.io\""
+    }),
+    { url: "https://site.acme-app.io/", environment: "production", source: "public/CNAME" }
+  );
+
+  // Falls through to a framework config file when nothing higher matches.
+  const fromConfig = productionTargetFromCodeFiles({
+    "next.config.js": "module.exports = { env: { SITE: 'https://prod.acme-app.io' } }"
+  });
+  assert.equal(fromConfig.source, "next.config.js");
+  assert.equal(fromConfig.environment, "production");
+
+  // No signal anywhere → empty result (no URL fabricated).
+  assert.deepEqual(productionTargetFromCodeFiles({ "package.json": "{}" }), {});
+  assert.deepEqual(productionTargetFromCodeFiles({}), {});
 });
 
 test("finished CD change summaries infer reviewable page links and cues", () => {

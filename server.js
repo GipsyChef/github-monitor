@@ -162,8 +162,26 @@ const CHANGE_FILE_LINK_LIMIT = 14;
 const MERGED_PR_SUMMARY_LIMIT = 10;
 const MERGED_PR_FILE_DETAIL_FETCH_LIMIT = 4;
 const MERGED_PR_FILE_LINK_LIMIT = 6;
-const PRODUCTION_TARGET_SCAN_LIMIT = 80;
+const PRODUCTION_TARGET_SCAN_LIMIT = 40;
 const PRODUCTION_TARGET_MAX_FILE_BYTES = 260000;
+// Fixed, high-signal files probed (in priority order) for a deployable URL.
+// Fetched in a single batched GraphQL call rather than one REST read each.
+const PRODUCTION_TARGET_CODE_FILES = [
+  "package.json",
+  "public/CNAME",
+  "CNAME",
+  "vercel.json",
+  "netlify.toml",
+  "next.config.js",
+  "next.config.mjs",
+  "next.config.ts",
+  "vite.config.js",
+  "vite.config.ts",
+  "astro.config.mjs",
+  "nuxt.config.js",
+  "nuxt.config.ts",
+  "svelte.config.js"
+];
 const QUOTA_SLOW_REMAINING = 200;
 const QUOTA_SLOW_RATIO = 0.15;
 const QUOTA_WARN_REMAINING = 500;
@@ -180,7 +198,9 @@ const RUNNING_ACTION_CACHE_TTL_MS = 60 * 1000;
 const RUNNING_DEPLOYMENT_CACHE_TTL_MS = 60 * 1000;
 const OWNER_REPOS_CACHE_TTL_MS = 5 * 60 * 1000;
 const DEPLOYMENT_TARGET_CACHE_TTL_MS = 10 * 60 * 1000;
-const PRODUCTION_TARGET_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
+// A repo's deploy target almost never changes; cache it (and the "none found"
+// result) for a day so the expensive code/tree probe runs ~4x less often.
+const PRODUCTION_TARGET_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const MERGED_PR_CACHE_TTL_MS = 10 * 60 * 1000;
 const RECENT_COMMIT_CACHE_TTL_MS = 5 * 60 * 1000;
 const RUNNING_RUN_STATUSES = new Set(["queued", "in_progress", "waiting", "requested", "pending"]);
@@ -1741,42 +1761,88 @@ function productionUrlFromCname(text) {
   return line ? likelyProductionUrl(line) : "";
 }
 
-async function fetchRepoProductionTargetFromCode(repo, ref = "") {
-  const packageJson = await fetchRepoTextFile(repo, "package.json", ref);
-  const packageUrl = productionUrlFromPackageJson(packageJson);
+// Pure precedence: package.json homepage, then CNAME files, then framework
+// config files (in PRODUCTION_TARGET_CODE_FILES order). `files` maps each known
+// path to its already-fetched text. Kept side-effect-free so it is unit-testable.
+function productionTargetFromCodeFiles(files = {}) {
+  const packageUrl = productionUrlFromPackageJson(files["package.json"]);
   if (packageUrl) {
     return { url: packageUrl, environment: "production", source: "package.json homepage" };
   }
 
   for (const cnamePath of ["public/CNAME", "CNAME"]) {
-    const cname = productionUrlFromCname(await fetchRepoTextFile(repo, cnamePath, ref));
+    const cname = productionUrlFromCname(files[cnamePath]);
     if (cname) {
       return { url: cname, environment: "production", source: cnamePath };
     }
   }
 
-  const configPaths = [
-    "vercel.json",
-    "netlify.toml",
-    "next.config.js",
-    "next.config.mjs",
-    "next.config.ts",
-    "vite.config.js",
-    "vite.config.ts",
-    "astro.config.mjs",
-    "nuxt.config.js",
-    "nuxt.config.ts",
-    "svelte.config.js"
-  ];
-  for (const path of configPaths) {
-    const text = await fetchRepoTextFile(repo, path, ref);
-    const url = firstProductionUrl(extractProductionUrlsFromText(text));
+  for (const path of PRODUCTION_TARGET_CODE_FILES) {
+    if (path === "package.json" || path === "public/CNAME" || path === "CNAME") continue;
+    const url = firstProductionUrl(extractProductionUrlsFromText(files[path] || ""));
     if (url) {
       return { url, environment: "production", source: path };
     }
   }
 
   return {};
+}
+
+function buildProductionTargetCodeQuery() {
+  const params = PRODUCTION_TARGET_CODE_FILES.map((_, index) => `$e${index}: String!`).join(", ");
+  const fields = PRODUCTION_TARGET_CODE_FILES
+    .map((_, index) => `f${index}: object(expression: $e${index}) { ... on Blob { text } }`)
+    .join("\n      ");
+  return `query ProductionTargetFiles($owner: String!, $name: String!, ${params}) {
+    repository(owner: $owner, name: $name) {
+      ${fields}
+    }
+  }`;
+}
+
+// One batched GraphQL request fetches every PRODUCTION_TARGET_CODE_FILES blob at
+// once (on the generous graphql budget) instead of up to 14 sequential REST
+// `contents` reads on the scarce core budget. Falls back to per-file REST reads
+// if the batch query fails for any reason.
+async function fetchRepoProductionTargetFromCode(repo, ref = "") {
+  let owner;
+  let name;
+  try {
+    ({ owner, name } = parseRepo(repo));
+  } catch {
+    return {};
+  }
+  const expressionRef = ref || "HEAD";
+  try {
+    const variables = { owner, name };
+    PRODUCTION_TARGET_CODE_FILES.forEach((path, index) => {
+      variables[`e${index}`] = `${expressionRef}:${path}`;
+    });
+    const json = await githubGraphql(buildProductionTargetCodeQuery(), variables, { ownerHint: owner });
+    const repository = json?.data?.repository;
+    if (repository) {
+      const files = {};
+      PRODUCTION_TARGET_CODE_FILES.forEach((path, index) => {
+        files[path] = repository[`f${index}`]?.text || "";
+      });
+      return productionTargetFromCodeFiles(files);
+    }
+  } catch {
+    return fetchRepoProductionTargetFromCodeViaRest(repo, ref);
+  }
+  return {};
+}
+
+async function fetchRepoProductionTargetFromCodeViaRest(repo, ref = "") {
+  const files = {};
+  for (const path of PRODUCTION_TARGET_CODE_FILES) {
+    files[path] = await fetchRepoTextFile(repo, path, ref);
+    // Preserve the original early-exit: stop reading once a higher-priority
+    // file already yields a target.
+    const found = productionTargetFromCodeFiles(files);
+    if (found.url) return found;
+  }
+  return productionTargetFromCodeFiles(files);
 }
 
 function isProductionTargetScanPath(path) {
@@ -3043,6 +3109,7 @@ export {
   extractProductionUrlsFromText,
   groupPullRequests,
   isProductionTargetScanPath,
+  productionTargetFromCodeFiles,
   publicRouteFromFile,
   isBackendUrl,
   isAutoMergeCandidate,
