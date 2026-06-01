@@ -1,7 +1,11 @@
 const STORAGE_KEY = "pr-deck:v1";
 const INBOX_KEY = "pr-deck:inbox:v1";
+const TRACE_CACHE_KEY = "pr-deck:traces:v1";
 const INBOX_MAX = 60;
 const INBOX_TTL_MS = 24 * 60 * 60 * 1000;
+const TRACE_CACHE_MAX = 250;
+const TRACE_ACTIVE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const TRACE_COMPLETED_TTL_MS = 24 * 60 * 60 * 1000;
 const REFRESH_RETRY_DELAYS_MS = [15_000, 30_000, 60_000, 120_000, 300_000];
 const QUOTA_SLOW_REMAINING = 200;
 const QUOTA_SLOW_RATIO = 0.15;
@@ -12,6 +16,7 @@ const state = {
   data: null,
   mode: persisted.mode || "all",
   view: persisted.view || "fail",
+  traceFilter: persisted.traceFilter || "flagged",
   filter: persisted.filter || "",
   notifications: persisted.notifications !== false,
   owners: Array.isArray(persisted.owners) ? persisted.owners.filter((value) => typeof value === "string" && value.trim()) : [],
@@ -26,6 +31,7 @@ const state = {
   refreshReason: "",
   inboxOpen: false,
   inbox: loadInbox(),
+  traceCache: loadTraceCache(),
   autoMerge: persisted.autoMerge === true,
   merging: new Set(),
   merged: new Set(),
@@ -106,10 +112,17 @@ const views = {
     empty: "No CD workflows are still failing.",
     color: "ink",
     rows: (data) => data.cd.failed
+  },
+  pipelineTraces: {
+    kicker: "Pipeline tracing",
+    title: "PR journeys from CI to production",
+    empty: "No PR journeys in this trace filter.",
+    color: "red",
+    rows: (data) => traceRows(data)
   }
 };
 
-const viewOrder = ["fail", "conflicts", "running", "pass", "noCi", "runningCd", "finishedCd", "deployments", "runners", "failedCd"];
+const viewOrder = ["fail", "conflicts", "running", "pass", "noCi", "pipelineTraces", "runningCd", "finishedCd", "deployments", "runners", "failedCd"];
 
 const els = {
   account: document.querySelector("#account"),
@@ -157,6 +170,10 @@ const metricIds = {
   runningCd: "metricCd",
   finishedCd: "metricFinishedCd",
   failedCd: "metricFailedCd",
+  flaggedJourneys: "metricTraceFlagged",
+  activeJourneys: "metricTraceActive",
+  shippedJourneys: "metricTraceShipped",
+  tracingUnknown: "metricTraceUnknown",
   repos: "metricRepos"
 };
 
@@ -170,7 +187,8 @@ const navIds = {
   finishedCd: "navFinishedCd",
   deployments: "navDeployments",
   runners: "navRunners",
-  failedCd: "navFailedCd"
+  failedCd: "navFailedCd",
+  pipelineTraces: "navPipelineTraces"
 };
 
 let lastGeneratedAt = null;
@@ -201,6 +219,20 @@ function loadInbox() {
   }
 }
 
+function loadTraceCache() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(TRACE_CACHE_KEY) || "[]");
+    if (!Array.isArray(raw)) return [];
+    const pruned = pruneTraceCache(raw);
+    if (pruned.length !== raw.length) {
+      localStorage.setItem(TRACE_CACHE_KEY, JSON.stringify(pruned));
+    }
+    return pruned;
+  } catch {
+    return [];
+  }
+}
+
 function pruneInbox(items) {
   const cutoff = Date.now() - INBOX_TTL_MS;
   return items
@@ -211,10 +243,36 @@ function pruneInbox(items) {
     .slice(0, INBOX_MAX);
 }
 
+function traceTimestamp(trace) {
+  const value = trace?.lastEvidenceAt || trace?.startedAt || trace?.updatedAt || 0;
+  const time = new Date(value).getTime();
+  return Number.isFinite(time) ? time : 0;
+}
+
+function pruneTraceCache(items) {
+  const now = Date.now();
+  return items
+    .filter((trace) => {
+      const time = traceTimestamp(trace);
+      if (!time) return false;
+      const ttl = trace?.status === "completed" ? TRACE_COMPLETED_TTL_MS : TRACE_ACTIVE_TTL_MS;
+      return now - time <= ttl;
+    })
+    .sort((a, b) => traceTimestamp(b) - traceTimestamp(a))
+    .slice(0, TRACE_CACHE_MAX);
+}
+
 function saveInbox() {
   try {
     state.inbox = pruneInbox(state.inbox);
     localStorage.setItem(INBOX_KEY, JSON.stringify(state.inbox.slice(0, INBOX_MAX)));
+  } catch {}
+}
+
+function saveTraceCache() {
+  try {
+    state.traceCache = pruneTraceCache(state.traceCache);
+    localStorage.setItem(TRACE_CACHE_KEY, JSON.stringify(state.traceCache));
   } catch {}
 }
 
@@ -225,6 +283,7 @@ function persist() {
       JSON.stringify({
         mode: state.mode,
         view: state.view,
+        traceFilter: state.traceFilter,
         filter: state.filter,
         autoMerge: state.autoMerge,
         notifications: state.notifications,
@@ -304,6 +363,55 @@ function formatDuration(ms) {
 
 function rowText(row) {
   return flattenText(row).join(" ").toLowerCase();
+}
+
+function traceKey(row) {
+  return row?.id || `${row?.repo || ""}#${row?.prNumber || row?.number || ""}`;
+}
+
+function flattenTraces(traces) {
+  return [
+    ...(traces?.flagged || []),
+    ...(traces?.active || []),
+    ...(traces?.completed || []),
+    ...(traces?.unknown || [])
+  ];
+}
+
+function groupTraceRows(rows) {
+  return {
+    flagged: rows.filter((row) => row.status === "flagged"),
+    active: rows.filter((row) => row.status === "active"),
+    completed: rows.filter((row) => row.status === "completed"),
+    unknown: rows.filter((row) => row.status === "unknown")
+  };
+}
+
+function traceRows(data) {
+  const traces = data?.traces || {};
+  if (state.traceFilter === "all") return flattenTraces(traces);
+  return traces[state.traceFilter] || [];
+}
+
+function mergeTraceData(data) {
+  if (!data?.traces) return data;
+  const fresh = flattenTraces(data.traces);
+  const byKey = new Map(state.traceCache.map((trace) => [traceKey(trace), trace]));
+  for (const trace of fresh) byKey.set(traceKey(trace), trace);
+  state.traceCache = pruneTraceCache([...byKey.values()]);
+  saveTraceCache();
+  const grouped = groupTraceRows(state.traceCache);
+  return {
+    ...data,
+    summary: {
+      ...(data.summary || {}),
+      flaggedJourneys: grouped.flagged.length,
+      activeJourneys: grouped.active.length,
+      shippedJourneys: grouped.completed.length,
+      tracingUnknown: grouped.unknown.length
+    },
+    traces: grouped
+  };
 }
 
 function flattenText(value) {
@@ -452,7 +560,8 @@ function buildActivitySnapshot(data) {
     includeCd: Boolean(data?.options?.includeCd),
     ci: new Map((data?.pullRequests?.running || []).map((row) => [prKey(row), row])),
     cd: new Map((data?.cd?.running || []).map((row) => [actionKey(row), row])),
-    conflicts: new Set(allPrs.filter((row) => row.hasConflict).map((row) => prKey(row)))
+    conflicts: new Set(allPrs.filter((row) => row.hasConflict).map((row) => prKey(row))),
+    traces: new Map(flattenTraces(data?.traces).map((row) => [traceKey(row), row]))
   };
 }
 
@@ -603,6 +712,25 @@ function notifyCompletedActions(previousSnapshot, data) {
       `conflict:${key}`,
       { url: pr.url, kind: "conflict", tone: "danger" }
     );
+  }
+
+  for (const [key, trace] of nextSnapshot.traces || []) {
+    const previous = previousSnapshot.traces?.get(key);
+    if (trace.status === "flagged" && previous?.status !== "flagged") {
+      sendPopup(
+        "Pipeline flagged",
+        `${trace.repo} ${trace.numberLabel || `#${trace.prNumber}`}: ${trace.reason || trace.title}`,
+        `trace:${key}:flagged`,
+        { url: trace.nextAction?.url || trace.prUrl, kind: "trace", tone: "danger" }
+      );
+    } else if (trace.status === "completed" && previous && previous.status !== "completed") {
+      sendPopup(
+        "Pipeline complete",
+        `${trace.repo} ${trace.numberLabel || `#${trace.prNumber}`}: production CD completed.`,
+        `trace:${key}:completed`,
+        { url: trace.nextAction?.url || trace.prUrl, kind: "trace", tone: "success" }
+      );
+    }
   }
 
   if (!previousSnapshot.includeCd || !nextSnapshot.includeCd) return;
@@ -894,6 +1022,7 @@ function buildParams() {
   const params = new URLSearchParams({
     mode: state.mode,
     includeCd: els.includeCd.checked ? "1" : "0",
+    includeTraces: "1",
     includeRunners: els.includeRunners.checked ? "1" : "0",
     includeRepoRunners: "0",
     jobs: "4"
@@ -925,13 +1054,14 @@ async function refresh({ source = "manual" } = {}) {
       }
       throw new Error(data.error || "Unable to refresh dashboard");
     }
-    notifyCompletedActions(state.activitySnapshot, data);
-    state.activitySnapshot = buildActivitySnapshot(data);
-    if (data.autoMerge) applyAutoMergeSnapshot(data.autoMerge);
-    state.data = data;
+    const mergedData = mergeTraceData(data);
+    notifyCompletedActions(state.activitySnapshot, mergedData);
+    state.activitySnapshot = buildActivitySnapshot(mergedData);
+    if (mergedData.autoMerge) applyAutoMergeSnapshot(mergedData.autoMerge);
+    state.data = mergedData;
     state.refreshRetryCount = 0;
     render();
-    scheduleAutoRefresh(data);
+    scheduleAutoRefresh(mergedData);
   } catch (error) {
     setError(error.message);
     scheduleRefreshRetry();
@@ -983,7 +1113,8 @@ function renderMetrics(data) {
     finishedCd: data.summary.finishedCd,
     deployments: data.summary.runningDeployments,
     runners: data.summary.busyRunners,
-    failedCd: data.summary.failedCd
+    failedCd: data.summary.failedCd,
+    pipelineTraces: data.summary.flaggedJourneys
   };
   for (const [key, id] of Object.entries(navIds)) {
     document.querySelector(`#${id}`).textContent = navCounts[key] ?? 0;
@@ -1002,7 +1133,11 @@ function syncActiveAffordances() {
     button.setAttribute("aria-current", isActive ? "true" : "false");
   });
   document.querySelectorAll("button.metric").forEach((button) => {
-    button.classList.toggle("active", button.dataset.view === state.view);
+    const isTraceMetric = Boolean(button.dataset.traceFilter);
+    const isActive = isTraceMetric
+      ? button.dataset.view === state.view && button.dataset.traceFilter === state.traceFilter
+      : button.dataset.view === state.view;
+    button.classList.toggle("active", isActive);
   });
 }
 
@@ -1044,15 +1179,49 @@ function render() {
   const rows = query ? all.filter((row) => rowText(row).includes(query)) : all;
   syncFilterUI(rows.length, all.length);
 
-  els.content.innerHTML = rows.length
+  const body = rows.length
     ? rows.map((row) => renderRow(row, state.view, view)).join("")
     : `<div class="empty">${escapeHtml(view.empty)}</div>`;
+  els.content.innerHTML = `${state.view === "pipelineTraces" ? renderTraceFilterBar(data) : ""}${body}`;
+}
+
+function renderTraceFilterBar(data) {
+  const counts = {
+    flagged: data?.summary?.flaggedJourneys || 0,
+    active: data?.summary?.activeJourneys || 0,
+    completed: data?.summary?.shippedJourneys || 0,
+    unknown: data?.summary?.tracingUnknown || 0
+  };
+  const total = Object.values(counts).reduce((sum, value) => sum + Number(value || 0), 0);
+  const options = [
+    ["flagged", "Flagged", counts.flagged],
+    ["active", "In flight", counts.active],
+    ["completed", "Shipped", counts.completed],
+    ["unknown", "Unknown", counts.unknown],
+    ["all", "All", total]
+  ];
+  return `
+    <div class="trace-filterbar" role="group" aria-label="Pipeline trace status filter">
+      ${options.map(([key, label, count]) => `
+        <button
+          class="trace-filter ${state.traceFilter === key ? "active" : ""}"
+          type="button"
+          data-trace-filter="${escapeHtml(key)}"
+          aria-pressed="${state.traceFilter === key ? "true" : "false"}"
+        >
+          <span>${escapeHtml(label)}</span>
+          <strong>${escapeHtml(count)}</strong>
+        </button>
+      `).join("")}
+    </div>
+  `;
 }
 
 function renderRow(row, viewKey, view) {
   if (viewKey === "fail" && row.kind === "workflowRun") return renderWorkflowRunRow(row, view);
   if (viewKey === "running" && row.kind === "workflowRun") return renderWorkflowRunRow(row, view);
   if (["pass", "noCi", "fail", "running", "conflicts"].includes(viewKey)) return renderPrRow(row, view);
+  if (viewKey === "pipelineTraces") return renderTraceRow(row);
   if (viewKey === "finishedCd") return renderFinishedCdRow(row, view);
   if (["runningCd", "finishedCd", "failedCd"].includes(viewKey)) return renderCdRow(row, view, viewKey);
   if (viewKey === "deployments") return renderDeploymentRow(row, view);
@@ -1184,6 +1353,85 @@ function renderCdRow(row, view, viewKey) {
       <div class="${tagClass}">${escapeHtml(status)}</div>
       <div class="meta">${escapeHtml(detail)}</div>
       ${row.url ? `<a class="open-link" href="${escapeHtml(row.url)}" target="_blank" rel="noreferrer">Open Run</a>` : ""}
+    </article>
+  `;
+}
+
+function traceTone(row) {
+  if (row.status === "completed") return "green";
+  if (row.status === "active") return "blue";
+  if (row.status === "unknown") return "gray";
+  if (row.severity === "critical" || row.severity === "high") return "red";
+  return "amber";
+}
+
+function traceStatusLabel(status) {
+  return {
+    complete: "Done",
+    active: "Active",
+    blocked: "Blocked",
+    missing: "Missing",
+    pending: "Pending",
+    unknown: "Unknown"
+  }[status] || status || "Pending";
+}
+
+function renderTraceStages(stages = []) {
+  return `
+    <ol class="trace-stages" aria-label="Pipeline stages">
+      ${stages.map((stage) => `
+        <li class="trace-stage trace-stage-${escapeHtml(stage.status || "pending")}">
+          <span class="trace-stage-dot" aria-hidden="true"></span>
+          <span class="trace-stage-label">${escapeHtml(stage.label || stage.key)}</span>
+          <strong>${escapeHtml(traceStatusLabel(stage.status))}</strong>
+        </li>
+      `).join("")}
+    </ol>
+  `;
+}
+
+function renderTraceEvidence(trace) {
+  const items = (trace.evidence || []).filter((item) => item?.label).slice(0, 4);
+  if (!items.length) return "";
+  return `
+    <details class="trace-evidence">
+      <summary>Evidence</summary>
+      <div class="trace-evidence-list">
+        ${items.map((item) => item.url
+          ? `<a class="source-link" href="${escapeHtml(item.url)}" target="_blank" rel="noreferrer">${escapeHtml(item.label)}</a>`
+          : `<span class="file-status">${escapeHtml(item.label)}</span>`
+        ).join("")}
+      </div>
+    </details>
+  `;
+}
+
+function renderTraceRow(row) {
+  const tone = traceTone(row);
+  const status = row.status === "completed" ? "shipped" : row.status === "active" ? "in flight" : row.status;
+  const action = row.nextAction?.url
+    ? `<a class="open-link" href="${escapeHtml(row.nextAction.url)}" target="_blank" rel="noreferrer">${escapeHtml(row.nextAction.label || "Open")}</a>`
+    : `<span class="trace-action-muted">${escapeHtml(row.nextAction?.label || "No action link")}</span>`;
+  const timeDetail = [row.baseRef ? `base ${row.baseRef}` : "", row.lastEvidenceAt ? `last ${formatRelative(row.lastEvidenceAt)}` : ""]
+    .filter(Boolean)
+    .join(" · ");
+  return `
+    <article class="trace-card trace-${escapeHtml(row.status || "active")}" style="--accent: var(--${tone}); --soft: var(--${tone}-soft);" aria-label="${escapeHtml(row.repo)} ${escapeHtml(row.numberLabel || `#${row.prNumber}`)} pipeline trace">
+      <div class="trace-card-head">
+        <div class="row-main">
+          <div class="repo">${escapeHtml(row.repo)}</div>
+          <div class="title">${escapeHtml(row.numberLabel || `#${row.prNumber}`)} ${escapeHtml(row.title)}</div>
+        </div>
+        <div class="tag tag-${escapeHtml(statusClass(row.severity || row.status))}">${escapeHtml(status)}</div>
+        ${action}
+      </div>
+      <p class="trace-reason">${escapeHtml(row.reason || "Pipeline state is being traced.")}</p>
+      ${renderTraceStages(row.stages || [])}
+      <div class="trace-meta">
+        <span>${escapeHtml(timeDetail || "Waiting for evidence")}</span>
+        <span>${escapeHtml(row.rule?.source === "auto" ? "auto mapping" : row.rule?.source || "rule")}</span>
+      </div>
+      ${renderTraceEvidence(row)}
     </article>
   `;
 }
@@ -1586,7 +1834,11 @@ function renderRunnerRow(row) {
 }
 
 function setView(view) {
-  if (!views[view] || state.view === view) return;
+  if (!views[view]) return;
+  if (state.view === view) {
+    render();
+    return;
+  }
   state.view = view;
   persist();
   render();
@@ -1616,6 +1868,7 @@ function relativeTime(value) {
 function inboxIconFor(kind) {
   if (kind === "ci") return "CI";
   if (kind === "cd") return "CD";
+  if (kind === "trace") return "TR";
   if (kind === "conflict") return "⚠";
   return "•";
 }
@@ -1974,7 +2227,13 @@ document.querySelectorAll(".rail-item").forEach((button) => {
 });
 
 document.querySelectorAll("button.metric").forEach((button) => {
-  button.addEventListener("click", () => setView(button.dataset.view));
+  button.addEventListener("click", () => {
+    if (button.dataset.traceFilter) {
+      state.traceFilter = button.dataset.traceFilter;
+      persist();
+    }
+    setView(button.dataset.view);
+  });
 });
 
 els.autoMerge.checked = state.autoMerge;
@@ -2037,6 +2296,14 @@ els.inboxPanel.addEventListener("click", (event) => {
     event.preventDefault();
   }
   markInboxItemRead(item.dataset.id);
+});
+
+els.content.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-trace-filter]");
+  if (!button) return;
+  state.traceFilter = button.dataset.traceFilter || "flagged";
+  persist();
+  render();
 });
 
 els.content.addEventListener("click", (event) => {

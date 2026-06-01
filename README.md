@@ -90,6 +90,7 @@ Token scopes you need depend on what you want to see:
 - Open PRs from non-archived repositories, grouped by **passing**, **no-CI**, **failing**, **running**, and **merge-conflict** states
 - Running non-CD GitHub Actions workflow runs, including jobs not represented by an open-PR status rollup
 - Optional **CD/deploy/release/publish** workflow audit, plus CD runs finished in the last 24h and the latest failed CD runs from the last 3 days
+- **Pipeline Traces** for PR journeys that have not completed from CI/merge through successful production CD
 - Running GitHub deployments
 - Busy org and (optional) repository-level self-hosted runners
 - GitHub API request count, remaining quota, and reset time, with **adaptive next-refresh timing**
@@ -141,6 +142,7 @@ All optional except your chosen auth path. Set via environment or `.env`.
 - **Owned** — repositories owned by your user
 - **Mine** — PRs you authored
 - **CD audit** — scan CD/deploy/release/publish workflows, recent CD runs, failed latest runs, and running deployments
+- **Pipeline Traces** — flag PR journeys that fail, skip, stall, or cannot be mapped before successful production CD
 - **Busy runners** — scan owner/org self-hosted runners
 - **Auto refresh** — schedules the next scan adaptively with a live countdown
 - **Auto merge** — counts passing PRs (with completed checks) down for 15s, then merges
