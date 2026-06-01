@@ -1235,13 +1235,10 @@ function render() {
   const all = view.rows(data);
   const filtered = query ? all.filter((row) => rowText(row).includes(query)) : all;
 
-  const canDismiss = state.view === "fail";
-  const dismissedCount = canDismiss
-    ? filtered.filter((row) => isDismissableRow(row) && isDismissed(actionKey(row))).length
-    : 0;
-  const rows = canDismiss && !state.showDismissed
-    ? filtered.filter((row) => !(isDismissableRow(row) && isDismissed(actionKey(row))))
-    : filtered;
+  const dismissedCount = filtered.filter((row) => { const k = dismissKey(row); return k && isDismissed(k); }).length;
+  const rows = state.showDismissed
+    ? filtered
+    : filtered.filter((row) => { const k = dismissKey(row); return !(k && isDismissed(k)); });
   syncFilterUI(rows.length, all.length);
 
   const body = rows.length
@@ -1251,12 +1248,31 @@ function render() {
   els.content.innerHTML = `${state.view === "pipelineTraces" ? renderTraceFilterBar(data) : ""}${dismissBar}${body}`;
 }
 
-function isDismissableRow(row) {
-  return row?.kind === "workflowRun";
+// Returns a stable dismiss key for a dismissable row, else null. Failing-CI
+// workflow runs are dismissable; so are flagged/unknown pipeline traces.
+function dismissKey(row) {
+  if (!row) return null;
+  if (state.view === "fail" && row.kind === "workflowRun") return actionKey(row);
+  if (state.view === "pipelineTraces" && (row.status === "flagged" || row.status === "unknown")) {
+    return `trace:${traceKey(row)}`;
+  }
+  return null;
+}
+
+function renderDismissButton(key, label) {
+  const dismissed = isDismissed(key);
+  return `<button
+    type="button"
+    class="row-dismiss"
+    data-dismiss-key="${escapeHtml(key)}"
+    data-dismiss-action="${dismissed ? "restore" : "dismiss"}"
+    title="${dismissed ? "Restore this item to the list" : "Dismiss this item from the list"}"
+    aria-label="${dismissed ? "Restore" : "Dismiss"} ${escapeHtml(label)}"
+  >${dismissed ? "Restore" : "Dismiss"}</button>`;
 }
 
 function renderDismissBar(count) {
-  const noun = count === 1 ? "run" : "runs";
+  const noun = count === 1 ? "item" : "items";
   return `
     <div class="dismiss-bar">
       <span class="dismiss-bar-label">${count} dismissed ${noun}</span>
@@ -1497,15 +1513,20 @@ function renderTraceRow(row) {
   const timeDetail = [row.baseRef ? `base ${row.baseRef}` : "", row.lastEvidenceAt ? `last ${formatRelative(row.lastEvidenceAt)}` : ""]
     .filter(Boolean)
     .join(" · ");
+  const key = dismissKey(row);
+  const dismissed = key ? isDismissed(key) : false;
+  const dismissButton = key
+    ? renderDismissButton(key, `${row.repo} ${row.numberLabel || `#${row.prNumber}`}`)
+    : "";
   return `
-    <article class="trace-card trace-${escapeHtml(row.status || "active")}" style="--accent: var(--${tone}); --soft: var(--${tone}-soft);" aria-label="${escapeHtml(row.repo)} ${escapeHtml(row.numberLabel || `#${row.prNumber}`)} pipeline trace">
+    <article class="trace-card trace-${escapeHtml(row.status || "active")}${dismissed ? " row-dismissed" : ""}" style="--accent: var(--${tone}); --soft: var(--${tone}-soft);" aria-label="${escapeHtml(row.repo)} ${escapeHtml(row.numberLabel || `#${row.prNumber}`)} pipeline trace">
       <div class="trace-card-head">
         <div class="row-main">
           <div class="repo">${escapeHtml(row.repo)}</div>
           <div class="title">${escapeHtml(row.numberLabel || `#${row.prNumber}`)} ${escapeHtml(row.title)}</div>
         </div>
         <div class="tag tag-${escapeHtml(statusClass(row.severity || row.status))}">${escapeHtml(status)}</div>
-        ${action}
+        <div class="trace-head-actions">${action}${dismissButton}</div>
       </div>
       <p class="trace-reason">${escapeHtml(row.reason || "Pipeline state is being traced.")}</p>
       ${renderTraceStages(row.stages || [])}
@@ -1871,19 +1892,9 @@ function renderWorkflowRunRow(row, view) {
   const detail = row.conclusion
     ? [`Reason: ${failureDetail(row, "CI failed")}`, timeDetail].filter(Boolean).join(" · ")
     : timeDetail;
-  const canDismiss = state.view === "fail";
-  const key = actionKey(row);
-  const dismissed = canDismiss && isDismissed(key);
-  const dismissButton = canDismiss
-    ? `<button
-         type="button"
-         class="row-dismiss"
-         data-dismiss-key="${escapeHtml(key)}"
-         data-dismiss-action="${dismissed ? "restore" : "dismiss"}"
-         title="${dismissed ? "Restore this run to the list" : "Dismiss this run from the list"}"
-         aria-label="${dismissed ? "Restore" : "Dismiss"} ${escapeHtml(row.workflow)} ${escapeHtml(row.runNumber)}"
-       >${dismissed ? "Restore" : "Dismiss"}</button>`
-    : "";
+  const key = dismissKey(row);
+  const dismissed = key ? isDismissed(key) : false;
+  const dismissButton = key ? renderDismissButton(key, `${row.workflow} ${row.runNumber}`) : "";
   return `
     <article class="row${dismissed ? " row-dismissed" : ""}" data-href="${escapeHtml(row.url || "")}" style="--accent: var(--${view.color}); --soft: var(--${view.color}-soft);">
       <div class="row-main">
