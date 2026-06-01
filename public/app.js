@@ -1160,8 +1160,60 @@ function adjustedSummary(data) {
   };
 }
 
-function renderMetrics(data) {
+function filteredVisibleRows(rows, isDismissable = () => false) {
+  const query = state.filter.trim().toLowerCase();
+  const list = Array.isArray(rows) ? rows : [];
+  return list.filter((row) => {
+    if (query && !rowText(row).includes(query)) return false;
+    const key = isDismissable(row);
+    return !(key && isDismissed(key));
+  });
+}
+
+function displayCounts(data) {
   const counts = adjustedSummary(data);
+  if (!state.filter.trim()) return counts;
+  const traceFlagged = filteredVisibleRows(data?.traces?.flagged, traceDismissKey).length;
+  const traceActive = filteredVisibleRows(data?.traces?.active).length;
+  const traceCompleted = filteredVisibleRows(data?.traces?.completed).length;
+  const traceUnknown = filteredVisibleRows(data?.traces?.unknown, traceDismissKey).length;
+  return {
+    ...counts,
+    passingPrs: filteredVisibleRows(data?.pullRequests?.pass).length,
+    noCiPrs: filteredVisibleRows(data?.pullRequests?.noCi).length,
+    failingPrs: filteredVisibleRows(
+      [...(data?.pullRequests?.fail || []), ...(data?.actions?.failed || [])],
+      (row) => row.kind === "workflowRun" && actionKey(row)
+    ).length,
+    conflictPrs: filteredVisibleRows(data?.pullRequests?.conflicts).length,
+    runningPrs: filteredVisibleRows([...(data?.pullRequests?.running || []), ...(data?.actions?.running || [])]).length,
+    runningCd: filteredVisibleRows(data?.cd?.running).length,
+    finishedCd: filteredVisibleRows(data?.cd?.finished).length,
+    failedCd: filteredVisibleRows(data?.cd?.failed).length,
+    runningDeployments: filteredVisibleRows(data?.deployments?.running).length,
+    busyRunners: filteredVisibleRows(data?.runners?.busy).length,
+    flaggedJourneys: traceFlagged,
+    activeJourneys: traceActive,
+    shippedJourneys: traceCompleted,
+    tracingUnknown: traceUnknown
+  };
+}
+
+function currentTraceCount(counts) {
+  if (state.traceFilter === "active") return counts.activeJourneys;
+  if (state.traceFilter === "completed") return counts.shippedJourneys;
+  if (state.traceFilter === "unknown") return counts.tracingUnknown;
+  if (state.traceFilter === "all") {
+    return Number(counts.flaggedJourneys || 0) +
+      Number(counts.activeJourneys || 0) +
+      Number(counts.shippedJourneys || 0) +
+      Number(counts.tracingUnknown || 0);
+  }
+  return counts.flaggedJourneys;
+}
+
+function renderMetrics(data) {
+  const counts = displayCounts(data);
   for (const [key, id] of Object.entries(metricIds)) {
     document.querySelector(`#${id}`).textContent = counts[key] ?? 0;
   }
@@ -1190,17 +1242,17 @@ function renderMetrics(data) {
     failedCdDot.classList.toggle("ink", failedCdTotal === 0);
   }
   const navCounts = {
-    pass: data.summary.passingPrs,
-    noCi: data.summary.noCiPrs,
+    pass: counts.passingPrs,
+    noCi: counts.noCiPrs,
     fail: counts.failingPrs,
-    conflicts: data.summary.conflictPrs,
-    running: data.summary.runningPrs,
-    runningCd: data.summary.runningCd,
-    finishedCd: data.summary.finishedCd,
-    deployments: data.summary.runningDeployments,
-    runners: data.summary.busyRunners,
-    failedCd: data.summary.failedCd,
-    pipelineTraces: counts.flaggedJourneys
+    conflicts: counts.conflictPrs,
+    running: counts.runningPrs,
+    runningCd: counts.runningCd,
+    finishedCd: counts.finishedCd,
+    deployments: counts.runningDeployments,
+    runners: counts.busyRunners,
+    failedCd: counts.failedCd,
+    pipelineTraces: currentTraceCount(counts)
   };
   for (const [key, id] of Object.entries(navIds)) {
     document.querySelector(`#${id}`).textContent = navCounts[key] ?? 0;
@@ -1234,6 +1286,14 @@ function syncFilterUI(matched, total) {
   } else {
     els.filterCount.textContent = `${matched}/${total}`;
   }
+}
+
+function renderEmptyState(view, allCount) {
+  const query = state.filter.trim();
+  if (query && allCount > 0) {
+    return `<div class="empty">No rows match "${escapeHtml(query)}". Clear the filter to show ${escapeHtml(allCount)} ${allCount === 1 ? "item" : "items"}.</div>`;
+  }
+  return `<div class="empty">${escapeHtml(view.empty)}</div>`;
 }
 
 function render() {
@@ -1272,7 +1332,7 @@ function render() {
 
   const body = rows.length
     ? rows.map((row) => renderRow(row, state.view, view)).join("")
-    : `<div class="empty">${escapeHtml(view.empty)}</div>`;
+    : renderEmptyState(view, all.length);
   const dismissBar = dismissedCount ? renderDismissBar(dismissedCount) : "";
   els.content.innerHTML = `${state.view === "pipelineTraces" ? renderTraceFilterBar(data) : ""}${dismissBar}${body}`;
 }
