@@ -2499,7 +2499,7 @@ async function buildDashboardData(requestUrl) {
   let busyRunners = [];
   let traces = groupTraces([]);
   let cdRowsByRepo = new Map();
-  let mergedPullRequestsByRepo = new Map();
+  let mergedPullRequestsByRepo;
 
   repos = await listRepos({ mode, me, pullRequests, jobs, owners });
 
