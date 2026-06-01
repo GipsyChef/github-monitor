@@ -24,6 +24,7 @@ import {
   publicRouteFromFile,
   isBackendUrl,
   runOutcome,
+  buildPipelineTraces,
   selectFailedActionRuns,
   selectFailedCdRuns,
   findSupersedingSuccessfulRun,
@@ -796,6 +797,128 @@ test("workflow run conclusions are classified into actionable outcomes", () => {
   assert.equal(runOutcome({ conclusion: "startup_failure" }), "failure");
   assert.equal(runOutcome({ conclusion: null }), "completed");
   assert.equal(runOutcome({}), "completed");
+});
+
+test("pipeline traces flag merged PRs that do not complete production CD", () => {
+  const now = Date.parse("2026-06-01T12:00:00Z");
+  const traces = buildPipelineTraces({
+    now,
+    includeCd: true,
+    pullRequests: [],
+    mergedPullRequestsByRepo: new Map([
+      ["acme/app", [
+        {
+          pr: {
+            number: 12,
+            title: "Ship billing export",
+            html_url: "https://github.com/acme/app/pull/12",
+            merged_at: "2026-06-01T11:30:00Z",
+            head: { sha: "abc123" },
+            merge_commit_sha: "def456",
+            base: { ref: "main" },
+            user: { login: "dev" }
+          }
+        }
+      ]]
+    ]),
+    cdRowsByRepo: new Map([
+      ["acme/app", [
+        {
+          repo: "acme/app",
+          workflow: "Deploy Production",
+          runNumber: "#44",
+          status: "completed",
+          conclusion: "failure",
+          outcome: "failure",
+          failureReason: "deploy failed",
+          branch: "main",
+          headSha: "def456",
+          createdAt: "2026-06-01T11:35:00Z",
+          updatedAt: "2026-06-01T11:40:00Z",
+          url: "https://github.com/acme/app/actions/runs/44"
+        }
+      ]]
+    ])
+  });
+
+  assert.equal(traces.flagged.length, 1);
+  assert.equal(traces.flagged[0].id, "acme/app#12");
+  assert.equal(traces.flagged[0].severity, "critical");
+  assert.equal(traces.flagged[0].nextAction.label, "Open failed run");
+  assert.match(traces.flagged[0].reason, /deploy failed/);
+});
+
+test("pipeline traces mark successful production CD as completed", () => {
+  const traces = buildPipelineTraces({
+    now: Date.parse("2026-06-01T12:00:00Z"),
+    includeCd: true,
+    pullRequests: [],
+    mergedPullRequestsByRepo: new Map([
+      ["acme/app", [
+        {
+          pr: {
+            number: 13,
+            title: "Improve settings",
+            html_url: "https://github.com/acme/app/pull/13",
+            merged_at: "2026-06-01T11:30:00Z",
+            head: { sha: "aaa111" },
+            merge_commit_sha: "bbb222",
+            base: { ref: "main" },
+            user: { login: "dev" }
+          }
+        }
+      ]]
+    ]),
+    cdRowsByRepo: new Map([
+      ["acme/app", [
+        {
+          repo: "acme/app",
+          workflow: "Deploy Production",
+          runNumber: "#45",
+          status: "completed",
+          conclusion: "success",
+          outcome: "success",
+          branch: "main",
+          headSha: "bbb222",
+          createdAt: "2026-06-01T11:35:00Z",
+          updatedAt: "2026-06-01T11:44:00Z",
+          url: "https://github.com/acme/app/actions/runs/45"
+        }
+      ]]
+    ])
+  });
+
+  assert.equal(traces.completed.length, 1);
+  assert.equal(traces.completed[0].status, "completed");
+  assert.equal(traces.flagged.length, 0);
+  assert.equal(traces.completed[0].stages.at(-1).status, "complete");
+});
+
+test("pipeline traces keep unmapped repositories separate from failures", () => {
+  const traces = buildPipelineTraces({
+    now: Date.parse("2026-06-01T12:00:00Z"),
+    includeCd: true,
+    pullRequests: [],
+    mergedPullRequestsByRepo: new Map([
+      ["acme/docs", [
+        {
+          pr: {
+            number: 2,
+            title: "Docs polish",
+            html_url: "https://github.com/acme/docs/pull/2",
+            merged_at: "2026-06-01T10:00:00Z",
+            base: { ref: "main" },
+            user: { login: "writer" }
+          }
+        }
+      ]]
+    ]),
+    cdRowsByRepo: new Map([["acme/docs", []]])
+  });
+
+  assert.equal(traces.unknown.length, 1);
+  assert.equal(traces.flagged.length, 0);
+  assert.match(traces.unknown[0].reason, /No production workflow/);
 });
 
 test("dashboard scoreboard surfaces skipped CD runs without a new lane", () => {

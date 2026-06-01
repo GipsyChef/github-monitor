@@ -48,8 +48,12 @@ const PR_SEARCH_GRAPHQL = `
           number
           title
           url
+          createdAt
+          updatedAt
           isDraft
           mergeable
+          headRefOid
+          baseRefName
           author {
             login
           }
@@ -99,8 +103,12 @@ const PR_BY_NUMBER_GRAPHQL = `
         number
         title
         url
+        createdAt
+        updatedAt
         isDraft
         mergeable
+        headRefOid
+        baseRefName
         headRefName
         headRepository {
           nameWithOwner
@@ -178,6 +186,9 @@ const RUNNING_DEPLOYMENT_STATES = new Set(["queued", "pending", "in_progress"]);
 const SUCCESSFUL_DEPLOYMENT_STATES = new Set(["success"]);
 const AUTO_MERGE_DELAY_MS = 15 * 1000;
 const AUTO_MERGE_SCAN_MS = 60 * 1000;
+const TRACE_CI_SLA_MS = 30 * 60 * 1000;
+const TRACE_CD_START_SLA_MS = 15 * 60 * 1000;
+const TRACE_PROD_COMPLETE_SLA_MS = 45 * 60 * 1000;
 const FAILURE_REASON_LABELS = {
   FAILURE: "failed",
   ERROR: "errored",
@@ -1440,10 +1451,14 @@ function classifyPullRequest(pr) {
     title: pr.title,
     author: pr.author?.login || "unknown",
     url: pr.url,
+    createdAt: pr.createdAt || "",
+    updatedAt: pr.updatedAt || "",
     isArchived: Boolean(pr.repository.isArchived),
     isDraft: Boolean(pr.isDraft),
     mergeable,
     hasConflict,
+    headSha: pr.headRefOid || "",
+    baseRefName: pr.baseRefName || "",
     headRefName: pr.headRefName || "",
     headRepo: pr.headRepository?.nameWithOwner || ""
   };
@@ -1872,6 +1887,303 @@ async function fetchRecentMergedPullRequests(repo) {
   });
 }
 
+function compactSha(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function normalizeMergedPullRequest(repo, item) {
+  const pr = item?.pr || item || {};
+  return {
+    repo,
+    number: pr.number,
+    numberLabel: `#${pr.number}`,
+    title: pr.title || "",
+    author: pr.user?.login || pr.author?.login || "unknown",
+    url: pr.html_url || pr.url || "",
+    mergedAt: pr.merged_at || pr.closed_at || "",
+    closedAt: pr.closed_at || "",
+    headSha: pr.head?.sha || pr.headSha || "",
+    mergeCommitSha: pr.merge_commit_sha || pr.mergeCommitSha || "",
+    baseRefName: pr.base?.ref || pr.baseRefName || "",
+    files: Array.isArray(item?.files) ? item.files : []
+  };
+}
+
+function traceStage(key, label, status, at = "", url = "") {
+  return { key, label, status, at, url };
+}
+
+function traceEvidence(type, label, url = "", at = "") {
+  return { type, label, url, at };
+}
+
+function traceAgeMs(value, now) {
+  const time = new Date(value || 0).getTime();
+  return Number.isFinite(time) ? now - time : 0;
+}
+
+function runHappenedAfter(run, isoDate) {
+  const runTime = new Date(run?.createdAt || run?.updatedAt || 0).getTime();
+  const baseTime = new Date(isoDate || 0).getTime();
+  if (!Number.isFinite(runTime) || !Number.isFinite(baseTime)) return false;
+  return runTime >= baseTime - 60 * 1000;
+}
+
+function cdRunMatchesPr(run, pr) {
+  if (!run || !pr) return false;
+  const runSha = compactSha(run.headSha);
+  const candidateShas = [pr.headSha, pr.mergeCommitSha].map(compactSha).filter(Boolean);
+  if (runSha && candidateShas.includes(runSha)) return true;
+  const branch = String(run.branch || "").toLowerCase();
+  const base = String(pr.baseRefName || "").toLowerCase();
+  return Boolean(branch && base && branch === base && runHappenedAfter(run, pr.mergedAt));
+}
+
+function traceStatusRank(status) {
+  return { flagged: 0, active: 1, unknown: 2, completed: 3 }[status] ?? 4;
+}
+
+function sortTraces(a, b) {
+  return traceStatusRank(a.status) - traceStatusRank(b.status) ||
+    String(b.lastEvidenceAt || b.startedAt || "").localeCompare(String(a.lastEvidenceAt || a.startedAt || "")) ||
+    String(a.repo || "").localeCompare(String(b.repo || "")) ||
+    Number(a.prNumber || 0) - Number(b.prNumber || 0);
+}
+
+function buildOpenPullRequestTrace(pr, { now = Date.now() } = {}) {
+  const startedAt = pr.createdAt || pr.updatedAt || new Date(now).toISOString();
+  const baseStages = [
+    traceStage("pr_opened", "PR opened", "complete", startedAt, pr.url),
+    traceStage("ci_complete", "CI complete", "pending"),
+    traceStage("merged", "Merged", "pending"),
+    traceStage("cd_started", "CD started", "pending"),
+    traceStage("prod_complete", "Production complete", "pending")
+  ];
+  const base = {
+    id: `${pr.repo}#${pr.number}`,
+    repo: pr.repo,
+    prNumber: pr.number,
+    numberLabel: pr.numberLabel,
+    title: pr.title,
+    author: pr.author,
+    prUrl: pr.url,
+    headSha: pr.headSha || "",
+    mergeCommitSha: "",
+    baseRef: pr.baseRefName || "",
+    startedAt,
+    lastEvidenceAt: pr.updatedAt || startedAt,
+    nextAction: { label: "Open PR", url: pr.url },
+    evidence: [traceEvidence("pull_request", `${pr.numberLabel} opened`, pr.url, startedAt)],
+    rule: { source: "auto", maxStageAgeMinutes: 30 },
+    stages: baseStages
+  };
+
+  if (pr.hasConflict) {
+    return {
+      ...base,
+      stage: "merged",
+      status: "flagged",
+      severity: "high",
+      reason: "Pull request has merge conflicts before it can continue toward production.",
+      stages: baseStages.map((stage) => stage.key === "merged" ? { ...stage, status: "blocked" } : stage)
+    };
+  }
+  if (pr.state === "fail") {
+    return {
+      ...base,
+      stage: "ci_complete",
+      status: "flagged",
+      severity: "critical",
+      reason: pr.failureReason || "CI failed before this PR could continue toward production.",
+      stages: baseStages.map((stage) => stage.key === "ci_complete" ? { ...stage, status: "blocked" } : stage)
+    };
+  }
+  if (pr.state === "running") {
+    const stale = traceAgeMs(pr.updatedAt || startedAt, now) > TRACE_CI_SLA_MS;
+    return {
+      ...base,
+      stage: "ci_complete",
+      status: stale ? "flagged" : "active",
+      severity: stale ? "medium" : "low",
+      reason: stale ? "CI is still running past the expected window." : "CI is still running.",
+      stages: baseStages.map((stage) => stage.key === "ci_complete" ? { ...stage, status: stale ? "blocked" : "active" } : stage)
+    };
+  }
+  return {
+    ...base,
+    stage: "merged",
+    status: "active",
+    severity: "low",
+    reason: "PR is ready, but has not merged and reached production yet.",
+    stages: baseStages.map((stage) => stage.key === "ci_complete" ? { ...stage, status: "complete" } : stage)
+  };
+}
+
+function buildMergedPullRequestTrace(pr, cdRows, { now = Date.now(), includeCd = true } = {}) {
+  const startedAt = pr.mergedAt || pr.closedAt || new Date(now).toISOString();
+  const matching = cdRows.filter((run) => cdRunMatchesPr(run, pr)).sort(sortByCreatedDesc);
+  const failures = matching.filter((run) => run.outcome === "failure" || FAILED_RUN_CONCLUSIONS.has(run.conclusion));
+  const skipped = matching.filter((run) => run.outcome === "skipped");
+  const successes = matching.filter((run) => run.outcome === "success");
+  const running = matching.filter((run) => RUNNING_RUN_STATUSES.has(run.status));
+  const latest = matching[0] || null;
+  const evidence = [
+    traceEvidence("pull_request", `${pr.numberLabel} merged`, pr.url, startedAt),
+    ...matching.slice(0, 4).map((run) => traceEvidence("workflow_run", `${run.workflow} ${run.runNumber}`, run.url, run.createdAt))
+  ];
+  const stages = [
+    traceStage("pr_opened", "PR opened", "complete", "", pr.url),
+    traceStage("ci_complete", "CI complete", "complete"),
+    traceStage("merged", "Merged", "complete", startedAt, pr.url),
+    traceStage("cd_started", "CD started", matching.length ? "complete" : "missing", latest?.createdAt || "", latest?.url || ""),
+    traceStage("prod_complete", "Production complete", "missing")
+  ];
+  const base = {
+    id: `${pr.repo}#${pr.number}`,
+    repo: pr.repo,
+    prNumber: pr.number,
+    numberLabel: pr.numberLabel,
+    title: pr.title,
+    author: pr.author,
+    prUrl: pr.url,
+    headSha: pr.headSha || "",
+    mergeCommitSha: pr.mergeCommitSha || "",
+    baseRef: pr.baseRefName || "",
+    startedAt,
+    lastEvidenceAt: latest?.updatedAt || latest?.createdAt || startedAt,
+    evidence,
+    rule: {
+      source: "auto",
+      productionEnvironmentPattern: "prod|production",
+      cdWorkflowPattern: CD_WORKFLOW_PATTERN.source,
+      maxStageAgeMinutes: TRACE_PROD_COMPLETE_SLA_MS / 60000
+    }
+  };
+
+  if (!includeCd) {
+    return {
+      ...base,
+      stage: "prod_complete",
+      status: "unknown",
+      severity: "low",
+      reason: "CD audit is off, so production completion cannot be verified.",
+      nextAction: { label: "Turn on CD audit", url: "" },
+      stages: stages.map((stage) => stage.key === "prod_complete" ? { ...stage, status: "unknown" } : stage)
+    };
+  }
+
+  if (successes.length) {
+    const success = successes[0];
+    return {
+      ...base,
+      stage: "prod_complete",
+      status: "completed",
+      severity: "low",
+      reason: "Production CD completed successfully.",
+      nextAction: { label: "Open deploy run", url: success.url },
+      lastEvidenceAt: success.updatedAt || success.createdAt || base.lastEvidenceAt,
+      stages: stages.map((stage) => stage.key === "prod_complete" ? { ...stage, status: "complete", at: success.createdAt, url: success.url } : stage)
+    };
+  }
+
+  if (failures.length) {
+    const failed = failures[0];
+    return {
+      ...base,
+      stage: "prod_complete",
+      status: "flagged",
+      severity: "critical",
+      reason: failed.failureReason || "Production CD failed after this PR merged.",
+      nextAction: { label: "Open failed run", url: failed.url },
+      lastEvidenceAt: failed.updatedAt || failed.createdAt || base.lastEvidenceAt,
+      stages: stages.map((stage) => stage.key === "prod_complete" ? { ...stage, status: "blocked", at: failed.createdAt, url: failed.url } : stage)
+    };
+  }
+
+  if (skipped.length) {
+    const skip = skipped[0];
+    return {
+      ...base,
+      stage: "prod_complete",
+      status: "flagged",
+      severity: "high",
+      reason: skip.skipReason || "CD was skipped; production was not updated.",
+      nextAction: { label: "Open skipped run", url: skip.url },
+      lastEvidenceAt: skip.updatedAt || skip.createdAt || base.lastEvidenceAt,
+      stages: stages.map((stage) => stage.key === "prod_complete" ? { ...stage, status: "blocked", at: skip.createdAt, url: skip.url } : stage)
+    };
+  }
+
+  if (running.length) {
+    const run = running[0];
+    const stale = traceAgeMs(run.createdAt, now) > TRACE_PROD_COMPLETE_SLA_MS;
+    return {
+      ...base,
+      stage: "prod_complete",
+      status: stale ? "flagged" : "active",
+      severity: stale ? "medium" : "low",
+      reason: stale ? "CD is still running past the expected production window." : "CD is running and has not completed production yet.",
+      nextAction: { label: "Open deploy run", url: run.url },
+      lastEvidenceAt: run.updatedAt || run.createdAt || base.lastEvidenceAt,
+      stages: stages.map((stage) => stage.key === "prod_complete" ? { ...stage, status: stale ? "blocked" : "active", at: run.createdAt, url: run.url } : stage)
+    };
+  }
+
+  const hasAnyCdEvidence = cdRows.length > 0;
+  if (!hasAnyCdEvidence) {
+    return {
+      ...base,
+      stage: "cd_started",
+      status: "unknown",
+      severity: "low",
+      reason: "No production workflow or deployment environment was detected for this repository.",
+      nextAction: { label: "Open PR", url: pr.url },
+      stages: stages.map((stage) => stage.key === "cd_started" || stage.key === "prod_complete" ? { ...stage, status: "unknown" } : stage)
+    };
+  }
+
+  const overdue = traceAgeMs(startedAt, now) > TRACE_CD_START_SLA_MS;
+  return {
+    ...base,
+    stage: "cd_started",
+    status: overdue ? "flagged" : "active",
+    severity: overdue ? "high" : "low",
+    reason: overdue ? "Merged PR has no matching production CD run yet." : "Waiting for a matching production CD run to start.",
+    nextAction: { label: "Open PR", url: pr.url },
+    stages: stages.map((stage) => stage.key === "cd_started" ? { ...stage, status: overdue ? "blocked" : "active" } : stage)
+  };
+}
+
+function groupTraces(traces) {
+  const sorted = [...traces].sort(sortTraces);
+  return {
+    flagged: sorted.filter((trace) => trace.status === "flagged"),
+    active: sorted.filter((trace) => trace.status === "active"),
+    completed: sorted.filter((trace) => trace.status === "completed"),
+    unknown: sorted.filter((trace) => trace.status === "unknown")
+  };
+}
+
+function buildPipelineTraces({ pullRequests = [], mergedPullRequestsByRepo = new Map(), cdRowsByRepo = new Map(), includeCd = true, now = Date.now() } = {}) {
+  const traces = [];
+  const seen = new Set();
+  for (const pr of pullRequests) {
+    const trace = buildOpenPullRequestTrace(pr, { now });
+    traces.push(trace);
+    seen.add(trace.id);
+  }
+  for (const [repo, items] of mergedPullRequestsByRepo.entries()) {
+    for (const item of items || []) {
+      const pr = normalizeMergedPullRequest(repo, item);
+      if (!pr.number || seen.has(`${repo}#${pr.number}`)) continue;
+      const cdRows = cdRowsByRepo.get(repo) || [];
+      traces.push(buildMergedPullRequestTrace(pr, cdRows, { now, includeCd }));
+      seen.add(`${repo}#${pr.number}`);
+    }
+  }
+  return groupTraces(traces);
+}
+
 async function fetchRecentCommits(repo, branch = "") {
   return cachedGithubValue(`recent-commits:${repo}:${branch || "default"}`, RECENT_COMMIT_CACHE_TTL_MS, async () => {
     try {
@@ -1926,13 +2238,17 @@ async function fetchCdForRepo(repo) {
             }
           : null;
         failed.push({
+          runId: failedRun.id || null,
           createdAt: failedAt,
+          updatedAt: failedRun.updated_at || "",
           repo,
           workflow: workflow.name,
           runNumber: `#${failedRun.run_number}`,
+          status: failedRun.status || "",
           conclusion: failedRun.conclusion || "",
           failureReason,
           branch: failedRun.head_branch || "",
+          headSha: failedRun.head_sha || failedRun.head_commit?.id || "",
           title: failedRun.display_title || "",
           url: failedRun.html_url || "",
           resolvedBy
@@ -1972,15 +2288,19 @@ async function fetchCdForRepo(repo) {
           );
         }
         finished.push({
+          runId: run.id || null,
           createdAt: finishedAt,
+          updatedAt: run.updated_at || "",
           repo,
           workflow: workflow.name,
           runNumber: `#${run.run_number}`,
+          status: run.status || "",
           conclusion: run.conclusion || "",
           outcome,
           failureReason,
           skipReason,
           branch: run.head_branch || "",
+          headSha: run.head_sha || run.head_commit?.id || "",
           title: run.display_title || "",
           url: run.html_url || "",
           changeSummary: changeSummaries.get(changeKey)
@@ -1989,12 +2309,15 @@ async function fetchCdForRepo(repo) {
 
       for (const run of recentWorkflowRuns.filter((item) => RUNNING_RUN_STATUSES.has(item.status))) {
         running.push({
+          runId: run.id || null,
           createdAt: run.created_at,
+          updatedAt: run.updated_at || "",
           repo,
           workflow: workflow.name,
           runNumber: `#${run.run_number}`,
           status: run.status || "",
           branch: run.head_branch || "",
+          headSha: run.head_sha || run.head_commit?.id || "",
           title: run.display_title || "",
           url: run.html_url || ""
         });
@@ -2160,6 +2483,7 @@ async function buildDashboardData(requestUrl) {
   const mode = normalizeMode(params.get("mode"));
   const jobs = parseJobs(params.get("jobs"));
   const includeCd = parseBool(params.get("includeCd"), true);
+  const includeTraces = parseBool(params.get("includeTraces"), false);
   const includeRunners = parseBool(params.get("includeRunners"), false) || parseBool(params.get("includeRepoRunners"), false);
   const includeRepoRunners = parseBool(params.get("includeRepoRunners"), false);
   const owners = parseOwners(params.get("owners"));
@@ -2173,6 +2497,9 @@ async function buildDashboardData(requestUrl) {
   let runningActions = [];
   let runningDeployments = [];
   let busyRunners = [];
+  let traces = groupTraces([]);
+  let cdRowsByRepo = new Map();
+  let mergedPullRequestsByRepo = new Map();
 
   repos = await listRepos({ mode, me, pullRequests, jobs, owners });
 
@@ -2184,6 +2511,10 @@ async function buildDashboardData(requestUrl) {
 
   if (includeCd && repos.length) {
     const cdGroups = await mapLimit(repos, jobs, fetchCdForRepo);
+    cdRowsByRepo = new Map(cdGroups.map((group, index) => [
+      repos[index],
+      [...group.failed, ...group.finished, ...group.running]
+    ]));
     failedCd = uniqueBy(cdGroups.flatMap((group) => group.failed), (run) => run.url || JSON.stringify(run))
       .filter((run) => !run.resolvedBy);
     finishedCd = uniqueBy(cdGroups.flatMap((group) => group.finished), (run) => run.url || JSON.stringify(run));
@@ -2194,6 +2525,20 @@ async function buildDashboardData(requestUrl) {
 
   if (includeRunners) {
     busyRunners = await fetchBusyRunners({ includeRepoRunners, repos, pullRequests, mode, me, jobs, owners });
+  }
+
+  if (includeTraces && repos.length) {
+    const mergedGroups = await mapLimit(repos, jobs, async (repo) => {
+      try {
+        return await fetchRecentMergedPullRequests(repo);
+      } catch {
+        return [];
+      }
+    });
+    mergedPullRequestsByRepo = new Map(mergedGroups.map((group, index) => [repos[index], group]));
+    traces = buildPipelineTraces({ pullRequests, mergedPullRequestsByRepo, cdRowsByRepo, includeCd });
+  } else if (includeTraces) {
+    traces = buildPipelineTraces({ pullRequests, includeCd });
   }
 
   const prGroups = groupPullRequests(pullRequests);
@@ -2211,7 +2556,11 @@ async function buildDashboardData(requestUrl) {
     skippedCd: finishedCd.filter((row) => row.outcome === "skipped").length,
     runningDeployments: runningDeployments.length,
     busyRunners: busyRunners.length,
-    failedCd: failedCd.length
+    failedCd: failedCd.length,
+    flaggedJourneys: traces.flagged.length,
+    activeJourneys: traces.active.length,
+    shippedJourneys: traces.completed.length,
+    tracingUnknown: traces.unknown.length
   };
   const rateLimit = snapshotRateLimit(scanMetrics.getStore() || createScanMetrics());
   const warnings = buildDashboardWarnings(rateLimit, summary, { mode, jobs, includeCd, includeRunners, includeRepoRunners });
@@ -2220,7 +2569,7 @@ async function buildDashboardData(requestUrl) {
     account: me,
     accounts,
     generatedAt: new Date().toISOString(),
-    options: { mode, jobs, includeCd, includeRunners, includeRepoRunners, owners },
+    options: { mode, jobs, includeCd, includeTraces, includeRunners, includeRepoRunners, owners },
     summary,
     rateLimit,
     warnings,
@@ -2235,6 +2584,7 @@ async function buildDashboardData(requestUrl) {
       finished: finishedCd.sort(sortByCreatedDesc),
       failed: failedCd.sort(sortByCreatedDesc)
     },
+    traces,
     deployments: {
       running: runningDeployments.sort(sortByCreatedDesc)
     },
@@ -2715,6 +3065,8 @@ export {
   scanMetrics,
   recommendRefresh,
   runOutcome,
+  cdRunMatchesPr,
+  buildPipelineTraces,
   selectFailedActionRuns,
   selectFailedCdRuns,
   findSupersedingSuccessfulRun,

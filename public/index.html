@@ -185,6 +185,22 @@
             <span class="metric-label">Failed CD</span>
             <strong id="metricFailedCd">0</strong>
           </button>
+          <button class="metric metric-red" type="button" data-view="pipelineTraces" data-trace-filter="flagged" aria-label="Show flagged PR pipeline journeys">
+            <span class="metric-label">Flagged</span>
+            <strong id="metricTraceFlagged">0</strong>
+          </button>
+          <button class="metric metric-blue" type="button" data-view="pipelineTraces" data-trace-filter="active" aria-label="Show in-flight PR pipeline journeys">
+            <span class="metric-label">In Flight</span>
+            <strong id="metricTraceActive">0</strong>
+          </button>
+          <button class="metric metric-green" type="button" data-view="pipelineTraces" data-trace-filter="completed" aria-label="Show shipped PR pipeline journeys">
+            <span class="metric-label">Shipped</span>
+            <strong id="metricTraceShipped">0</strong>
+          </button>
+          <button class="metric metric-gray" type="button" data-view="pipelineTraces" data-trace-filter="unknown" aria-label="Show unmapped PR pipeline journeys">
+            <span class="metric-label">Unknown</span>
+            <strong id="metricTraceUnknown">0</strong>
+          </button>
           <div class="metric metric-gray" aria-label="Repositories in scope">
             <span class="metric-label">Repos</span>
             <strong id="metricRepos">0</strong>
@@ -224,6 +240,11 @@
               <span class="dot gray"></span>
               No CI
               <strong id="navNoCi">0</strong>
+            </button>
+            <button class="rail-item" type="button" data-view="pipelineTraces">
+              <span class="dot red"></span>
+              Pipeline Traces
+              <strong id="navPipelineTraces">0</strong>
             </button>
             <button class="rail-item" type="button" data-view="runningCd">
               <span class="dot blue"></span>
