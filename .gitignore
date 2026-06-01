@@ -14,3 +14,6 @@ dist/
 build/
 .nyc_output/
 .cache/
+
+# Local visual-QA screenshot artifacts
+.qa/
