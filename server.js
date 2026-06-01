@@ -168,6 +168,12 @@ const QUOTA_SLOW_REMAINING = 200;
 const QUOTA_SLOW_RATIO = 0.15;
 const QUOTA_WARN_REMAINING = 500;
 const QUOTA_WARN_RATIO = 0.3;
+// The absolute `remaining` thresholds above only make sense for large hourly
+// buckets (core/graphql, 5000/hr). Small per-minute buckets like the Search
+// secondary limit (30/min) would otherwise trip "low" at 50% remaining and
+// pause the whole dashboard for a quota that refills in ~60s. For buckets
+// smaller than this floor, judge purely by ratio + reset proximity.
+const QUOTA_ABSOLUTE_LIMIT_FLOOR = 1000;
 const CD_WORKFLOW_CACHE_TTL_MS = 15 * 60 * 1000;
 const WORKFLOW_RUN_CACHE_TTL_MS = 60 * 1000;
 const RUNNING_ACTION_CACHE_TTL_MS = 60 * 1000;
@@ -663,13 +669,14 @@ function quotaState(rateLimit) {
   const remainingRatio = remaining / limit;
   const resetAt = tightest.resetAt || "";
   const retryAfterSeconds = secondsUntil(resetAt) + 30;
+  const absoluteApplies = limit >= QUOTA_ABSOLUTE_LIMIT_FLOOR;
   if (remaining <= 0) {
     return { status: "exhausted", blocked: true, tightest, resetAt, retryAfterSeconds };
   }
-  if (remaining < QUOTA_SLOW_REMAINING || remainingRatio < QUOTA_SLOW_RATIO) {
+  if (remainingRatio < QUOTA_SLOW_RATIO || (absoluteApplies && remaining < QUOTA_SLOW_REMAINING)) {
     return { status: "low", blocked: true, tightest, resetAt, retryAfterSeconds };
   }
-  if (remaining < QUOTA_WARN_REMAINING || remainingRatio < QUOTA_WARN_RATIO) {
+  if (remainingRatio < QUOTA_WARN_RATIO || (absoluteApplies && remaining < QUOTA_WARN_REMAINING)) {
     return { status: "watch", blocked: false, tightest, resetAt, retryAfterSeconds: 0 };
   }
   return { status: "ok", blocked: false, tightest, resetAt, retryAfterSeconds: 0 };
@@ -1850,33 +1857,14 @@ async function fetchMergedPullRequestsFromList(repo) {
     .slice(0, MERGED_PR_SUMMARY_LIMIT);
 }
 
-async function fetchMergedPullRequestsFromSearch(repo) {
-  const json = await githubRequest("/search/issues", {
-    query: {
-      q: `repo:${repo} is:pr is:merged`,
-      sort: "updated",
-      order: "desc",
-      per_page: MERGED_PR_SUMMARY_LIMIT
-    }
-  });
-  const items = Array.isArray(json?.items) ? json.items : [];
-  return items.map((item) => ({
-    number: item.number,
-    title: item.title,
-    merged_at: item.closed_at || item.updated_at || "",
-    closed_at: item.closed_at || "",
-    html_url: item.html_url || "",
-    user: item.user || null
-  }));
-}
-
 async function fetchRecentMergedPullRequests(repo) {
   return cachedGithubValue(`merged-prs:${repo}`, MERGED_PR_CACHE_TTL_MS, async () => {
     try {
-      let merged = await fetchMergedPullRequestsFromList(repo);
-      if (!merged.length) {
-        merged = await fetchMergedPullRequestsFromSearch(repo);
-      }
+      // List-only: the 100 most-recently-updated closed PRs reliably cover the
+      // "recent merged" window. We deliberately avoid the REST /search/issues
+      // fallback here — it draws on the scarce 30/min Search secondary limit and
+      // would pause the whole dashboard for marginal coverage of stale merges.
+      const merged = await fetchMergedPullRequestsFromList(repo);
       return mapLimit(merged, 4, async (pr, index) => ({
         pr,
         files: index < MERGED_PR_FILE_DETAIL_FETCH_LIMIT ? await fetchPullRequestFiles(repo, pr.number) : []

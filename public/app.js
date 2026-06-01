@@ -9,6 +9,11 @@ const TRACE_COMPLETED_TTL_MS = 24 * 60 * 60 * 1000;
 const REFRESH_RETRY_DELAYS_MS = [15_000, 30_000, 60_000, 120_000, 300_000];
 const QUOTA_SLOW_REMAINING = 200;
 const QUOTA_SLOW_RATIO = 0.15;
+// Only apply the absolute `remaining` floor to large hourly buckets (core/graphql).
+// Small per-minute buckets like Search (30/min) are judged by ratio alone so a
+// half-full bucket that refills in ~60s never pauses the dashboard. Mirrors
+// QUOTA_ABSOLUTE_LIMIT_FLOOR in server.js.
+const QUOTA_ABSOLUTE_LIMIT_FLOOR = 1000;
 
 const persisted = loadPersisted();
 
@@ -816,7 +821,9 @@ function quotaBlockFromRateLimit(rateLimit) {
   const remaining = Number(tightest.remaining);
   const limit = Math.max(1, Number(tightest.limit) || 1);
   const remainingRatio = remaining / limit;
-  if (remaining >= QUOTA_SLOW_REMAINING && remainingRatio >= QUOTA_SLOW_RATIO) return null;
+  const absoluteApplies = limit >= QUOTA_ABSOLUTE_LIMIT_FLOOR;
+  const low = remainingRatio < QUOTA_SLOW_RATIO || (absoluteApplies && remaining < QUOTA_SLOW_REMAINING);
+  if (!low) return null;
   const resetAt = tightest.resetAt || "";
   const resetTime = new Date(resetAt).getTime();
   if (!Number.isFinite(resetTime) || resetTime <= Date.now()) return null;

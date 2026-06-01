@@ -212,6 +212,26 @@ test("refresh recommendations pause when GitHub API quota is low", () => {
   assert.ok(new Date(refresh.nextRefreshAt).getTime() >= new Date(resetAt).getTime());
 });
 
+test("a half-full small per-minute bucket (Search 15/30) does not pause refresh", () => {
+  // The Search secondary limit is 30/min. At 15/30 it is half-full and refills
+  // in ~60s — the absolute `remaining < 200` floor must not apply to it.
+  const resetAt = new Date(Date.now() + 45 * 1000).toISOString();
+  const quota = quotaState({
+    tightest: { resource: "search", remaining: 15, limit: 30, resetAt }
+  });
+  assert.equal(quota.blocked, false);
+  assert.equal(quota.status, "ok");
+});
+
+test("a nearly-exhausted small bucket still blocks by ratio", () => {
+  const resetAt = new Date(Date.now() + 30 * 1000).toISOString();
+  const quota = quotaState({
+    tightest: { resource: "search", remaining: 3, limit: 30, resetAt }
+  });
+  assert.equal(quota.blocked, true);
+  assert.equal(quota.status, "low");
+});
+
 test("production target scan finds deployable URLs in project code", () => {
   assert.equal(isProductionTargetScanPath("infra/cdk/app-stack.ts"), true);
   assert.equal(isProductionTargetScanPath("src/components/Button.tsx"), false);
