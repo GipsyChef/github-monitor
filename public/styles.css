@@ -408,6 +408,17 @@ kbd {
 .metric-group {
   flex: var(--tiles, 1) 1 calc(var(--tiles, 1) * 116px);
   min-width: min(100%, 232px);
+  animation: metric-rise 460ms cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+/* One orchestrated reveal on load, staggered left-to-right by cluster. */
+.metric-group:nth-child(1) { animation-delay: 30ms; }
+.metric-group:nth-child(2) { animation-delay: 100ms; }
+.metric-group:nth-child(3) { animation-delay: 170ms; }
+.metric-group:nth-child(4) { animation-delay: 240ms; }
+
+@keyframes metric-rise {
+  from { opacity: 0; transform: translateY(7px); }
+  to { opacity: 1; transform: none; }
 }
 
 .metric-group-label {
@@ -488,6 +499,17 @@ button.metric.active .metric-dot {
   box-shadow: none;
 }
 .metric.metric-static strong { color: var(--muted-strong); }
+
+/* Scope is passive context, not a status to scan — render Repos as a compact
+   square that hugs its content instead of a full-width bar. */
+.metric-group-scope { flex: 0 0 auto; }
+.metric-group-scope .metric-grid { grid-template-columns: auto; }
+.metric.metric-square {
+  min-width: 86px;
+  gap: 8px;
+  padding: 10px 12px 11px;
+}
+.metric.metric-square strong { font-size: 26px; }
 
 .metric-label {
   min-width: 0;
@@ -852,6 +874,53 @@ button.metric.active .metric-dot {
 }
 
 .row-main { min-width: 0; }
+
+/* —————————————————————— DISMISS —————————————————————— */
+.dismiss-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 4px 4px 12px;
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  color: var(--muted-strong);
+}
+
+.dismiss-toggle {
+  min-height: 26px;
+  padding: 0 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--paper-strong);
+  font-family: var(--sans);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--ink);
+  transition: border-color 160ms ease;
+}
+.dismiss-toggle:hover { border-color: var(--ink); }
+
+/* Secondary action — quieter than the bordered Open Run primary. */
+.row-dismiss {
+  min-height: 30px;
+  padding: 0 9px;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  background: transparent;
+  font-family: var(--sans);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--muted);
+  transition: color 160ms ease, background 160ms ease;
+}
+.row-dismiss:hover { color: var(--ink); background: var(--paper); }
+.row-dismiss:focus-visible { outline: 2px solid var(--accent, var(--ink)); outline-offset: 2px; }
+
+.row-dismissed { opacity: 0.55; }
+.row-dismissed:hover { opacity: 1; }
 
 .repo {
   font-family: var(--mono);
