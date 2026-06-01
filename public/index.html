@@ -21,6 +21,10 @@
         </div>
 
         <section class="controls" aria-label="Dashboard controls">
+          <span class="repo-chip" title="Repositories in scope">
+            <span class="repo-chip-label">Repos</span>
+            <strong id="metricRepos">0</strong>
+          </span>
           <div class="segmented" role="group" aria-label="Scope">
             <button class="segment active" type="button" data-mode="all" aria-pressed="true">All</button>
             <button class="segment" type="button" data-mode="owned" aria-pressed="false">Owned</button>
@@ -216,16 +220,6 @@
                 <span class="metric-top"><span class="metric-dot"></span><span class="metric-label">Unknown</span></span>
                 <strong id="metricTraceUnknown">0</strong>
               </button>
-            </div>
-          </div>
-
-          <div class="metric-group metric-group-scope" style="--tiles: 1" role="group" aria-label="Scope">
-            <p class="metric-group-label">Scope</p>
-            <div class="metric-grid">
-              <div class="metric metric-gray metric-static metric-square" aria-label="Repositories in scope">
-                <span class="metric-top"><span class="metric-dot"></span><span class="metric-label">Repos</span></span>
-                <strong id="metricRepos">0</strong>
-              </div>
             </div>
           </div>
         </section>
