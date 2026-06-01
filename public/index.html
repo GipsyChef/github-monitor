@@ -150,60 +150,83 @@
 
       <main>
         <section class="scoreboard" aria-label="Summary">
-          <button class="metric metric-green" type="button" data-view="pass" aria-label="Show passing CI">
-            <span class="metric-label">Passing CI</span>
-            <strong id="metricPassing">0</strong>
-          </button>
-          <button class="metric metric-gray" type="button" data-view="noCi" aria-label="Show ready PRs without CI">
-            <span class="metric-label">No CI</span>
-            <strong id="metricNoCi">0</strong>
-          </button>
-          <button class="metric metric-red" type="button" data-view="fail" aria-label="Show failing CI">
-            <span class="metric-label">Failing CI</span>
-            <strong id="metricFailing">0</strong>
-          </button>
-          <button class="metric metric-conflict" type="button" data-view="conflicts" aria-label="Show PRs with merge conflicts">
-            <span class="metric-label">Conflicts</span>
-            <strong id="metricConflicts">0</strong>
-          </button>
-          <button class="metric metric-amber" type="button" data-view="running" aria-label="Show CI in progress">
-            <span class="metric-label">CI Running</span>
-            <strong id="metricRunning">0</strong>
-          </button>
-          <button class="metric metric-blue" type="button" data-view="runningCd" aria-label="Show running CD">
-            <span class="metric-label">Running CD</span>
-            <strong id="metricCd">0</strong>
-          </button>
-          <button class="metric metric-green" type="button" data-view="finishedCd" aria-label="Show finished CD">
-            <span class="metric-stack">
-              <span class="metric-label">Finished CD</span>
-              <span class="metric-sub metric-sub-warning" id="metricFinishedCdSub" hidden></span>
-            </span>
-            <strong id="metricFinishedCd">0</strong>
-          </button>
-          <button class="metric metric-ink" type="button" data-view="failedCd" aria-label="Show failed CD">
-            <span class="metric-label">Failed CD</span>
-            <strong id="metricFailedCd">0</strong>
-          </button>
-          <button class="metric metric-red" type="button" data-view="pipelineTraces" data-trace-filter="flagged" aria-label="Show flagged PR pipeline journeys">
-            <span class="metric-label">Flagged</span>
-            <strong id="metricTraceFlagged">0</strong>
-          </button>
-          <button class="metric metric-blue" type="button" data-view="pipelineTraces" data-trace-filter="active" aria-label="Show in-flight PR pipeline journeys">
-            <span class="metric-label">In Flight</span>
-            <strong id="metricTraceActive">0</strong>
-          </button>
-          <button class="metric metric-green" type="button" data-view="pipelineTraces" data-trace-filter="completed" aria-label="Show shipped PR pipeline journeys">
-            <span class="metric-label">Shipped</span>
-            <strong id="metricTraceShipped">0</strong>
-          </button>
-          <button class="metric metric-gray" type="button" data-view="pipelineTraces" data-trace-filter="unknown" aria-label="Show unmapped PR pipeline journeys">
-            <span class="metric-label">Unknown</span>
-            <strong id="metricTraceUnknown">0</strong>
-          </button>
-          <div class="metric metric-gray" aria-label="Repositories in scope">
-            <span class="metric-label">Repos</span>
-            <strong id="metricRepos">0</strong>
+          <div class="metric-group" style="--tiles: 5" role="group" aria-label="Integration">
+            <p class="metric-group-label">Integration</p>
+            <div class="metric-grid">
+              <button class="metric metric-green" type="button" data-view="pass" aria-label="Show passing CI">
+                <span class="metric-top"><span class="metric-dot"></span><span class="metric-label">Passing CI</span></span>
+                <strong id="metricPassing">0</strong>
+              </button>
+              <button class="metric metric-gray" type="button" data-view="noCi" aria-label="Show ready PRs without CI">
+                <span class="metric-top"><span class="metric-dot"></span><span class="metric-label">No CI</span></span>
+                <strong id="metricNoCi">0</strong>
+              </button>
+              <button class="metric metric-red" type="button" data-view="fail" aria-label="Show failing CI">
+                <span class="metric-top"><span class="metric-dot"></span><span class="metric-label">Failing CI</span></span>
+                <strong id="metricFailing">0</strong>
+              </button>
+              <button class="metric metric-conflict" type="button" data-view="conflicts" aria-label="Show PRs with merge conflicts">
+                <span class="metric-top"><span class="metric-dot"></span><span class="metric-label">Conflicts</span></span>
+                <strong id="metricConflicts">0</strong>
+              </button>
+              <button class="metric metric-amber" type="button" data-view="running" aria-label="Show CI in progress">
+                <span class="metric-top"><span class="metric-dot"></span><span class="metric-label">CI Running</span></span>
+                <strong id="metricRunning">0</strong>
+              </button>
+            </div>
+          </div>
+
+          <div class="metric-group" style="--tiles: 3" role="group" aria-label="Delivery">
+            <p class="metric-group-label">Delivery</p>
+            <div class="metric-grid">
+              <button class="metric metric-blue" type="button" data-view="runningCd" aria-label="Show running CD">
+                <span class="metric-top"><span class="metric-dot"></span><span class="metric-label">Running CD</span></span>
+                <strong id="metricCd">0</strong>
+              </button>
+              <button class="metric metric-green" type="button" data-view="finishedCd" aria-label="Show finished CD">
+                <span class="metric-top"><span class="metric-dot"></span><span class="metric-label">Finished CD</span></span>
+                <span class="metric-value">
+                  <strong id="metricFinishedCd">0</strong>
+                  <span class="metric-sub metric-sub-warning" id="metricFinishedCdSub" hidden></span>
+                </span>
+              </button>
+              <button class="metric metric-ink" type="button" data-view="failedCd" aria-label="Show failed CD">
+                <span class="metric-top"><span class="metric-dot"></span><span class="metric-label">Failed CD</span></span>
+                <strong id="metricFailedCd">0</strong>
+              </button>
+            </div>
+          </div>
+
+          <div class="metric-group" style="--tiles: 4" role="group" aria-label="Pipeline">
+            <p class="metric-group-label">Pipeline</p>
+            <div class="metric-grid">
+              <button class="metric metric-red" type="button" data-view="pipelineTraces" data-trace-filter="flagged" aria-label="Show flagged PR pipeline journeys">
+                <span class="metric-top"><span class="metric-dot"></span><span class="metric-label">Flagged</span></span>
+                <strong id="metricTraceFlagged">0</strong>
+              </button>
+              <button class="metric metric-blue" type="button" data-view="pipelineTraces" data-trace-filter="active" aria-label="Show in-flight PR pipeline journeys">
+                <span class="metric-top"><span class="metric-dot"></span><span class="metric-label">In Flight</span></span>
+                <strong id="metricTraceActive">0</strong>
+              </button>
+              <button class="metric metric-green" type="button" data-view="pipelineTraces" data-trace-filter="completed" aria-label="Show shipped PR pipeline journeys">
+                <span class="metric-top"><span class="metric-dot"></span><span class="metric-label">Shipped</span></span>
+                <strong id="metricTraceShipped">0</strong>
+              </button>
+              <button class="metric metric-gray" type="button" data-view="pipelineTraces" data-trace-filter="unknown" aria-label="Show unmapped PR pipeline journeys">
+                <span class="metric-top"><span class="metric-dot"></span><span class="metric-label">Unknown</span></span>
+                <strong id="metricTraceUnknown">0</strong>
+              </button>
+            </div>
+          </div>
+
+          <div class="metric-group" style="--tiles: 1" role="group" aria-label="Scope">
+            <p class="metric-group-label">Scope</p>
+            <div class="metric-grid">
+              <div class="metric metric-gray metric-static" aria-label="Repositories in scope">
+                <span class="metric-top"><span class="metric-dot"></span><span class="metric-label">Repos</span></span>
+                <strong id="metricRepos">0</strong>
+              </div>
+            </div>
           </div>
         </section>
 
