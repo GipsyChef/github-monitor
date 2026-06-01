@@ -872,15 +872,18 @@ function sameWorkflowRunLane(left, right) {
   return leftWorkflow === rightWorkflow && (left.head_branch || "") === (right.head_branch || "");
 }
 
-function findSupersedingSuccessfulActionRun(completedRunsNewestFirst, failedRun) {
-  if (!Array.isArray(completedRunsNewestFirst) || !failedRun) return null;
+// A failure is only worth surfacing if it is the latest completed run in its
+// lane (same workflow + branch). Any newer completed run supersedes it: a later
+// success means the retry delivered, and a later failure means this older run is
+// stale noise — either way we show at most the lane's current state, once.
+function hasNewerCompletedRunInLane(completedRunsNewestFirst, failedRun) {
+  if (!Array.isArray(completedRunsNewestFirst) || !failedRun) return false;
   const idx = completedRunsNewestFirst.indexOf(failedRun);
-  if (idx <= 0) return null;
+  if (idx <= 0) return false;
   for (let i = idx - 1; i >= 0; i--) {
-    const candidate = completedRunsNewestFirst[i];
-    if (sameWorkflowRunLane(candidate, failedRun) && runOutcome(candidate) === "success") return candidate;
+    if (sameWorkflowRunLane(completedRunsNewestFirst[i], failedRun)) return true;
   }
-  return null;
+  return false;
 }
 
 function selectFailedActionRuns(runs, { now = Date.now() } = {}) {
@@ -891,7 +894,7 @@ function selectFailedActionRuns(runs, { now = Date.now() } = {}) {
     if (run.event === "pull_request" || run.event === "pull_request_target") return false;
     if (!FAILED_RUN_CONCLUSIONS.has(run.conclusion)) return false;
     if (!isWithinFailedActionWindow(run.updated_at || run.created_at, now)) return false;
-    return !findSupersedingSuccessfulActionRun(completedRuns, run);
+    return !hasNewerCompletedRunInLane(completedRuns, run);
   });
 }
 

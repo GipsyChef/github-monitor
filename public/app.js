@@ -14,6 +14,11 @@ const QUOTA_SLOW_RATIO = 0.15;
 // half-full bucket that refills in ~60s never pauses the dashboard. Mirrors
 // QUOTA_ABSOLUTE_LIMIT_FLOOR in server.js.
 const QUOTA_ABSOLUTE_LIMIT_FLOOR = 1000;
+const DISMISSED_KEY = "pr-deck:dismissed:v1";
+// Dismissals are a local per-user view preference (no server/cloud state — see
+// the state-architecture note in the README). They auto-expire so the list
+// can't grow forever and a brand-new run for the same lane reappears on its own.
+const DISMISSED_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
 const persisted = loadPersisted();
 
@@ -37,6 +42,8 @@ const state = {
   inboxOpen: false,
   inbox: loadInbox(),
   traceCache: loadTraceCache(),
+  dismissed: loadDismissed(),
+  showDismissed: false,
   autoMerge: persisted.autoMerge === true,
   merging: new Set(),
   merged: new Set(),
@@ -236,6 +243,49 @@ function loadTraceCache() {
   } catch {
     return [];
   }
+}
+
+function loadDismissed() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(DISMISSED_KEY) || "{}");
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+    const cutoff = Date.now() - DISMISSED_TTL_MS;
+    const pruned = {};
+    for (const [key, at] of Object.entries(raw)) {
+      const time = new Date(at).getTime();
+      if (Number.isFinite(time) && time >= cutoff) pruned[key] = at;
+    }
+    if (Object.keys(pruned).length !== Object.keys(raw).length) {
+      localStorage.setItem(DISMISSED_KEY, JSON.stringify(pruned));
+    }
+    return pruned;
+  } catch {
+    return {};
+  }
+}
+
+function saveDismissed() {
+  try {
+    localStorage.setItem(DISMISSED_KEY, JSON.stringify(state.dismissed));
+  } catch {}
+}
+
+function isDismissed(key) {
+  return Boolean(key && state.dismissed[key]);
+}
+
+function dismissRow(key) {
+  if (!key || state.dismissed[key]) return;
+  state.dismissed[key] = new Date().toISOString();
+  saveDismissed();
+  render();
+}
+
+function restoreRow(key) {
+  if (!key || !state.dismissed[key]) return;
+  delete state.dismissed[key];
+  saveDismissed();
+  render();
 }
 
 function pruneInbox(items) {
@@ -1183,13 +1233,38 @@ function render() {
 
   const query = state.filter.trim().toLowerCase();
   const all = view.rows(data);
-  const rows = query ? all.filter((row) => rowText(row).includes(query)) : all;
+  const filtered = query ? all.filter((row) => rowText(row).includes(query)) : all;
+
+  const canDismiss = state.view === "fail";
+  const dismissedCount = canDismiss
+    ? filtered.filter((row) => isDismissableRow(row) && isDismissed(actionKey(row))).length
+    : 0;
+  const rows = canDismiss && !state.showDismissed
+    ? filtered.filter((row) => !(isDismissableRow(row) && isDismissed(actionKey(row))))
+    : filtered;
   syncFilterUI(rows.length, all.length);
 
   const body = rows.length
     ? rows.map((row) => renderRow(row, state.view, view)).join("")
     : `<div class="empty">${escapeHtml(view.empty)}</div>`;
-  els.content.innerHTML = `${state.view === "pipelineTraces" ? renderTraceFilterBar(data) : ""}${body}`;
+  const dismissBar = dismissedCount ? renderDismissBar(dismissedCount) : "";
+  els.content.innerHTML = `${state.view === "pipelineTraces" ? renderTraceFilterBar(data) : ""}${dismissBar}${body}`;
+}
+
+function isDismissableRow(row) {
+  return row?.kind === "workflowRun";
+}
+
+function renderDismissBar(count) {
+  const noun = count === 1 ? "run" : "runs";
+  return `
+    <div class="dismiss-bar">
+      <span class="dismiss-bar-label">${count} dismissed ${noun}</span>
+      <button type="button" class="dismiss-toggle" data-dismiss-toggle>
+        ${state.showDismissed ? "Hide" : "Show"}
+      </button>
+    </div>
+  `;
 }
 
 function renderTraceFilterBar(data) {
@@ -1796,8 +1871,21 @@ function renderWorkflowRunRow(row, view) {
   const detail = row.conclusion
     ? [`Reason: ${failureDetail(row, "CI failed")}`, timeDetail].filter(Boolean).join(" · ")
     : timeDetail;
+  const canDismiss = state.view === "fail";
+  const key = actionKey(row);
+  const dismissed = canDismiss && isDismissed(key);
+  const dismissButton = canDismiss
+    ? `<button
+         type="button"
+         class="row-dismiss"
+         data-dismiss-key="${escapeHtml(key)}"
+         data-dismiss-action="${dismissed ? "restore" : "dismiss"}"
+         title="${dismissed ? "Restore this run to the list" : "Dismiss this run from the list"}"
+         aria-label="${dismissed ? "Restore" : "Dismiss"} ${escapeHtml(row.workflow)} ${escapeHtml(row.runNumber)}"
+       >${dismissed ? "Restore" : "Dismiss"}</button>`
+    : "";
   return `
-    <article class="row" data-href="${escapeHtml(row.url || "")}" style="--accent: var(--${view.color}); --soft: var(--${view.color}-soft);">
+    <article class="row${dismissed ? " row-dismissed" : ""}" data-href="${escapeHtml(row.url || "")}" style="--accent: var(--${view.color}); --soft: var(--${view.color}-soft);">
       <div class="row-main">
         <div class="repo">${escapeHtml(row.repo)}</div>
         <div class="title">${escapeHtml(row.title || row.workflow)}</div>
@@ -1805,7 +1893,10 @@ function renderWorkflowRunRow(row, view) {
       <div class="meta">${escapeHtml(row.workflow)} ${escapeHtml(row.runNumber)}</div>
       <div class="tag">${escapeHtml(status)}</div>
       <div class="meta">${escapeHtml(detail)}</div>
-      ${row.url ? `<a class="open-link" href="${escapeHtml(row.url)}" target="_blank" rel="noreferrer">Open Run</a>` : ""}
+      <div class="row-actions">
+        ${row.url ? `<a class="open-link" href="${escapeHtml(row.url)}" target="_blank" rel="noreferrer">Open Run</a>` : ""}
+        ${dismissButton}
+      </div>
     </article>
   `;
 }
@@ -2311,6 +2402,25 @@ els.content.addEventListener("click", (event) => {
   state.traceFilter = button.dataset.traceFilter || "flagged";
   persist();
   render();
+});
+
+els.content.addEventListener("click", (event) => {
+  const dismissButton = event.target.closest("[data-dismiss-key]");
+  if (dismissButton) {
+    event.preventDefault();
+    event.stopPropagation();
+    const key = dismissButton.getAttribute("data-dismiss-key");
+    if (dismissButton.getAttribute("data-dismiss-action") === "restore") restoreRow(key);
+    else dismissRow(key);
+    return;
+  }
+  const toggle = event.target.closest("[data-dismiss-toggle]");
+  if (toggle) {
+    event.preventDefault();
+    event.stopPropagation();
+    state.showDismissed = !state.showDismissed;
+    render();
+  }
 });
 
 els.content.addEventListener("click", (event) => {

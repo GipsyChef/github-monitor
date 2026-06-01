@@ -806,6 +806,32 @@ test("failed non-CD workflow runs stay in failing CI until a newer same-lane suc
   assert.deepEqual(failed.map((run) => run.id), [3]);
 });
 
+test("only the latest completed run per lane surfaces as a failure", () => {
+  const now = Date.parse("2026-06-01T12:00:00Z");
+  const minutesAgo = (mins) => new Date(now - mins * 60 * 1000).toISOString();
+  const lane = { name: "ci", path: ".github/workflows/ci.yml", event: "push", head_branch: "main", status: "completed" };
+  // Two consecutive in-window failures in the same lane: only the newest shows.
+  const sameLaneFailures = [
+    { ...lane, id: 30, conclusion: "failure", updated_at: minutesAgo(5) },
+    { ...lane, id: 29, conclusion: "failure", updated_at: minutesAgo(30) }
+  ];
+  assert.deepEqual(selectFailedActionRuns(sameLaneFailures, { now }).map((r) => r.id), [30]);
+
+  // A newer success in the lane means the retry delivered: nothing surfaces.
+  const retriedAndDelivered = [
+    { ...lane, id: 31, conclusion: "success", updated_at: minutesAgo(2) },
+    { ...lane, id: 30, conclusion: "failure", updated_at: minutesAgo(5) }
+  ];
+  assert.deepEqual(selectFailedActionRuns(retriedAndDelivered, { now }).map((r) => r.id), []);
+
+  // Failures in different lanes are independent and both surface.
+  const distinctLanes = [
+    { ...lane, id: 40, conclusion: "failure", updated_at: minutesAgo(5) },
+    { ...lane, id: 41, head_branch: "develop", conclusion: "failure", updated_at: minutesAgo(6) }
+  ];
+  assert.deepEqual(selectFailedActionRuns(distinctLanes, { now }).map((r) => r.id).sort(), [40, 41]);
+});
+
 test("workflow run conclusions are classified into actionable outcomes", () => {
   assert.equal(runOutcome({ conclusion: "success" }), "success");
   assert.equal(runOutcome({ conclusion: "neutral" }), "success");
