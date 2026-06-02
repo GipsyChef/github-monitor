@@ -1563,13 +1563,23 @@ function traceStatusLabel(status) {
   }[status] || status || "Pending";
 }
 
+function traceStageLabel(stage) {
+  // The production milestone is named for its completed state, so it reads as a
+  // contradiction ("Production complete / Active") while the deploy is still running.
+  // Show the in-progress wording until it is actually complete.
+  if (stage.key === "prod_complete" && stage.status !== "complete") {
+    return stage.status === "active" ? "Deploying to production" : "Production";
+  }
+  return stage.label || stage.key;
+}
+
 function renderTraceStages(stages = []) {
   return `
     <ol class="trace-stages" aria-label="Pipeline stages">
       ${stages.map((stage) => `
         <li class="trace-stage trace-stage-${escapeHtml(stage.status || "pending")}">
           <span class="trace-stage-dot" aria-hidden="true"></span>
-          <span class="trace-stage-label">${escapeHtml(stage.label || stage.key)}</span>
+          <span class="trace-stage-label">${escapeHtml(traceStageLabel(stage))}</span>
           <strong>${escapeHtml(traceStatusLabel(stage.status))}</strong>
         </li>
       `).join("")}
