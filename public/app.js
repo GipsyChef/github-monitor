@@ -4,7 +4,6 @@ const TRACE_CACHE_KEY = "pr-deck:traces:v1";
 const INBOX_MAX = 60;
 const INBOX_TTL_MS = 24 * 60 * 60 * 1000;
 const TRACE_CACHE_MAX = 250;
-const TRACE_ACTIVE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const TRACE_COMPLETED_TTL_MS = 24 * 60 * 60 * 1000;
 const REFRESH_RETRY_DELAYS_MS = [15_000, 30_000, 60_000, 120_000, 300_000];
 const QUOTA_SLOW_REMAINING = 200;
@@ -308,10 +307,14 @@ function pruneTraceCache(items) {
   const now = Date.now();
   return items
     .filter((trace) => {
+      // Only shipped journeys are retained as history. Non-terminal states
+      // (active/flagged/unknown) must come from the live scan — a journey that
+      // has since shipped or aged out of the server's trace window would
+      // otherwise stay frozen as a stale "in flight" card indefinitely.
+      if (trace?.status !== "completed") return false;
       const time = traceTimestamp(trace);
       if (!time) return false;
-      const ttl = trace?.status === "completed" ? TRACE_COMPLETED_TTL_MS : TRACE_ACTIVE_TTL_MS;
-      return now - time <= ttl;
+      return now - time <= TRACE_COMPLETED_TTL_MS;
     })
     .sort((a, b) => traceTimestamp(b) - traceTimestamp(a))
     .slice(0, TRACE_CACHE_MAX);
@@ -455,11 +458,17 @@ function traceRows(data) {
 function mergeTraceData(data) {
   if (!data?.traces) return data;
   const fresh = flattenTraces(data.traces);
-  const byKey = new Map(state.traceCache.map((trace) => [traceKey(trace), trace]));
-  for (const trace of fresh) byKey.set(traceKey(trace), trace);
-  state.traceCache = pruneTraceCache([...byKey.values()]);
+  const freshKeys = new Set(fresh.map(traceKey));
+  // History keeps only shipped journeys the live scan no longer reports, so a PR
+  // that has since shipped or fallen out of the server's trace window is never
+  // resurrected from cache as a stale "in flight" card. All non-terminal states
+  // are taken straight from the fresh scan.
+  const shippedHistory = state.traceCache.filter(
+    (trace) => trace.status === "completed" && !freshKeys.has(traceKey(trace))
+  );
+  state.traceCache = pruneTraceCache([...fresh, ...shippedHistory]);
   saveTraceCache();
-  const grouped = groupTraceRows(state.traceCache);
+  const grouped = groupTraceRows([...fresh, ...shippedHistory]);
   return {
     ...data,
     summary: {
