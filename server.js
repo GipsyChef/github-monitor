@@ -2402,6 +2402,10 @@ async function fetchActionsForRepo(repo) {
           runNumber: `#${run.run_number}`,
           status: run.status || "",
           branch: run.head_branch || "",
+          ...(run.head_sha || run.head_commit?.id ? { headSha: run.head_sha || run.head_commit?.id } : {}),
+          ...((run.pull_requests || []).some((item) => item.number)
+            ? { pullRequestNumbers: (run.pull_requests || []).map((item) => item.number).filter(Boolean) }
+            : {}),
           title: run.display_title || run.name || "",
           url: run.html_url || ""
         }));
@@ -2414,6 +2418,10 @@ async function fetchActionsForRepo(repo) {
         status: run.status || "",
         conclusion: run.conclusion || "",
         branch: run.head_branch || "",
+        ...(run.head_sha || run.head_commit?.id ? { headSha: run.head_sha || run.head_commit?.id } : {}),
+        ...((run.pull_requests || []).some((item) => item.number)
+          ? { pullRequestNumbers: (run.pull_requests || []).map((item) => item.number).filter(Boolean) }
+          : {}),
         title: run.display_title || run.name || "",
         url: run.html_url || "",
         failureReason: await fetchWorkflowRunFailureReason(repo, run)
@@ -2423,6 +2431,46 @@ async function fetchActionsForRepo(repo) {
       return { failed: [], running: [] };
     }
   });
+}
+
+function workflowRunMatchesPullRequest(run, pr) {
+  if (!run || !pr || run.repo !== pr.repo) return false;
+  if ((run.pullRequestNumbers || []).includes(pr.number)) return true;
+  if (run.headSha && pr.headSha && run.headSha === pr.headSha) return true;
+  return false;
+}
+
+function applyActionRunEvidenceToPullRequests(pullRequests, { runningActions = [], failedActions = [] } = {}) {
+  if (!runningActions.length && !failedActions.length) return pullRequests;
+  return pullRequests.map((pr) => {
+    if (pr.hasConflict) return pr;
+    const running = runningActions.filter((run) => workflowRunMatchesPullRequest(run, pr));
+    const failed = failedActions.filter((run) => workflowRunMatchesPullRequest(run, pr));
+    if (running.length) {
+      return {
+        ...pr,
+        state: "running",
+        checkCount: Math.max(pr.checkCount || 0, running.length),
+        runningChecks: running.map((run) => `${run.workflow} ${run.runNumber} [${run.status || "RUNNING"}]`)
+      };
+    }
+    if (failed.length && pr.state === "pass" && pr.checkCount === 0) {
+      return {
+        ...pr,
+        state: "fail",
+        checkCount: Math.max(pr.checkCount || 0, failed.length),
+        failedChecks: failed.map((run) => `${run.workflow} ${run.runNumber}`),
+        failureReason: failed.map((run) => failureDetailFromRun(run)).filter(Boolean).join(", ") || "CI failed"
+      };
+    }
+    return pr;
+  });
+}
+
+function failureDetailFromRun(run) {
+  const conclusion = run?.conclusion ? FAILURE_REASON_LABELS[run.conclusion] || run.conclusion : "";
+  const title = [run?.workflow, run?.runNumber].filter(Boolean).join(" ");
+  return [title, conclusion].filter(Boolean).join(" ");
 }
 
 async function fetchRunningDeploymentsForRepo(repo) {
@@ -2545,7 +2593,7 @@ async function buildDashboardData(requestUrl) {
   const includeRepoRunners = parseBool(params.get("includeRepoRunners"), false);
   const owners = parseOwners(params.get("owners"));
   const me = await getAccount();
-  const pullRequests = await fetchPullRequests({ mode, me, jobs, owners });
+  let pullRequests = await fetchPullRequests({ mode, me, jobs, owners });
   let repos = [];
   let failedCd = [];
   let finishedCd = [];
@@ -2564,6 +2612,7 @@ async function buildDashboardData(requestUrl) {
     const actionGroups = await mapLimit(repos, jobs, fetchActionsForRepo);
     failedActions = uniqueBy(actionGroups.flatMap((group) => group.failed), (run) => run.url || JSON.stringify(run));
     runningActions = uniqueBy(actionGroups.flatMap((group) => group.running), (run) => run.url || JSON.stringify(run));
+    pullRequests = applyActionRunEvidenceToPullRequests(pullRequests, { runningActions, failedActions });
   }
 
   if (includeCd && repos.length) {
@@ -3108,6 +3157,7 @@ export {
   classifyPullRequest,
   extractProductionUrlsFromText,
   groupPullRequests,
+  applyActionRunEvidenceToPullRequests,
   isProductionTargetScanPath,
   productionTargetFromCodeFiles,
   publicRouteFromFile,
