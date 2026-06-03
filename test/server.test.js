@@ -10,6 +10,7 @@ import {
   classifyPullRequest,
   extractProductionUrlsFromText,
   groupPullRequests,
+  applyActionRunEvidenceToPullRequests,
   isProductionTargetScanPath,
   productionTargetFromCodeFiles,
   isAutoMergeCandidate,
@@ -95,6 +96,44 @@ test("pull requests without CI are classified instead of dropped", () => {
   assert.equal(pr.state, "pass");
   assert.equal(pr.checkCount, 0);
   assert.equal(pr.hasConflict, false);
+});
+
+test("running Actions evidence moves PRs out of the no-CI bucket", () => {
+  const [pr] = applyActionRunEvidenceToPullRequests(
+    [
+      {
+        repo: "GipsyChef/alaskaroadtrip-business",
+        number: 297,
+        numberLabel: "#297",
+        title: "SEO recommendations",
+        state: "pass",
+        checkCount: 0,
+        hasConflict: false,
+        headSha: "abc123"
+      }
+    ],
+    {
+      runningActions: [
+        {
+          kind: "workflowRun",
+          repo: "GipsyChef/alaskaroadtrip-business",
+          workflow: "CI",
+          runNumber: "#370",
+          status: "in_progress",
+          headSha: "abc123",
+          pullRequestNumbers: [297]
+        }
+      ]
+    }
+  );
+
+  assert.equal(pr.state, "running");
+  assert.equal(pr.checkCount, 1);
+  assert.deepEqual(pr.runningChecks, ["CI #370 [in_progress]"]);
+
+  const groups = groupPullRequests([pr]);
+  assert.deepEqual(groups.noCi, []);
+  assert.deepEqual(groups.running.map((row) => row.number), [297]);
 });
 
 test("pull request classification carries archived repo state", () => {

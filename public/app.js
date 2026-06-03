@@ -1,10 +1,26 @@
 const STORAGE_KEY = "pr-deck:v1";
 const INBOX_KEY = "pr-deck:inbox:v1";
 const TRACE_CACHE_KEY = "pr-deck:traces:v1";
+const PHASE_AGE_KEY = "pr-deck:phase-ages:v1";
 const INBOX_MAX = 60;
 const INBOX_TTL_MS = 24 * 60 * 60 * 1000;
 const TRACE_CACHE_MAX = 250;
 const TRACE_COMPLETED_TTL_MS = 24 * 60 * 60 * 1000;
+const PHASE_AGE_MAX = 500;
+const PHASE_AGE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+const PHASE_THRESHOLDS_MS = {
+  ci_running: 30 * 60 * 1000,
+  merge_pending: 2 * 60 * 1000,
+  auto_merge_waiting: 5 * 60 * 1000,
+  passing_ci: 8 * 60 * 60 * 1000,
+  no_ci: 24 * 60 * 60 * 1000,
+  failing_ci: 2 * 60 * 60 * 1000,
+  conflicts: 24 * 60 * 60 * 1000,
+  action_running: 30 * 60 * 1000,
+  cd_running: 45 * 60 * 1000,
+  deployment_running: 45 * 60 * 1000,
+  runner_busy: 2 * 60 * 60 * 1000
+};
 const REFRESH_RETRY_DELAYS_MS = [15_000, 30_000, 60_000, 120_000, 300_000];
 const QUOTA_SLOW_REMAINING = 200;
 const QUOTA_SLOW_RATIO = 0.15;
@@ -41,6 +57,7 @@ const state = {
   inboxOpen: false,
   inbox: loadInbox(),
   traceCache: loadTraceCache(),
+  phaseAges: loadPhaseAges(),
   dismissed: loadDismissed(),
   showDismissed: false,
   autoMerge: persisted.autoMerge === true,
@@ -244,6 +261,16 @@ function loadTraceCache() {
   }
 }
 
+function loadPhaseAges() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(PHASE_AGE_KEY) || "{}");
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+    return prunePhaseAges(raw);
+  } catch {
+    return {};
+  }
+}
+
 function loadDismissed() {
   try {
     const raw = JSON.parse(localStorage.getItem(DISMISSED_KEY) || "{}");
@@ -261,6 +288,13 @@ function loadDismissed() {
   } catch {
     return {};
   }
+}
+
+function savePhaseAges() {
+  try {
+    state.phaseAges = prunePhaseAges(state.phaseAges);
+    localStorage.setItem(PHASE_AGE_KEY, JSON.stringify(state.phaseAges));
+  } catch {}
 }
 
 function saveDismissed() {
@@ -332,6 +366,19 @@ function saveTraceCache() {
     state.traceCache = pruneTraceCache(state.traceCache);
     localStorage.setItem(TRACE_CACHE_KEY, JSON.stringify(state.traceCache));
   } catch {}
+}
+
+function prunePhaseAges(ages) {
+  const now = Date.now();
+  const entries = Object.entries(ages || {})
+    .filter(([, entry]) => {
+      if (!entry || typeof entry !== "object") return false;
+      const observed = new Date(entry.observedAt || entry.enteredAt || 0).getTime();
+      return Number.isFinite(observed) && now - observed <= PHASE_AGE_TTL_MS;
+    })
+    .sort((a, b) => new Date(b[1].observedAt || 0).getTime() - new Date(a[1].observedAt || 0).getTime())
+    .slice(0, PHASE_AGE_MAX);
+  return Object.fromEntries(entries);
 }
 
 function persist() {
@@ -456,7 +503,7 @@ function traceRows(data) {
 }
 
 function mergeTraceData(data) {
-  if (!data?.traces) return data;
+  if (!data?.traces) return annotateDataWithPhaseAges(data);
   const fresh = flattenTraces(data.traces);
   const freshKeys = new Set(fresh.map(traceKey));
   // History keeps only shipped journeys the live scan no longer reports, so a PR
@@ -469,7 +516,7 @@ function mergeTraceData(data) {
   state.traceCache = pruneTraceCache([...fresh, ...shippedHistory]);
   saveTraceCache();
   const grouped = groupTraceRows([...fresh, ...shippedHistory]);
-  return {
+  return annotateDataWithPhaseAges({
     ...data,
     summary: {
       ...(data.summary || {}),
@@ -479,7 +526,7 @@ function mergeTraceData(data) {
       tracingUnknown: grouped.unknown.length
     },
     traces: grouped
-  };
+  });
 }
 
 function flattenText(value) {
@@ -495,6 +542,173 @@ function actionKey(row) {
 
 function prKey(row) {
   return row?.url || `${row?.repo || ""}#${row?.number || ""}`;
+}
+
+function phaseKey(row, phase) {
+  return `${phase}:${prKey(row)}`;
+}
+
+function workflowPhaseKey(row, phase) {
+  return `${phase}:${actionKey(row)}`;
+}
+
+function currentPrPhase(row) {
+  if (!row) return "";
+  const key = mergeKey(row.repo, row.number);
+  if (state.merging.has(key)) return "merge_pending";
+  if (state.autoMerges.has(key)) return "auto_merge_waiting";
+  if (row.hasConflict) return "conflicts";
+  if (row.state === "running") return "ci_running";
+  if (row.state === "fail") return "failing_ci";
+  if (row.state === "pass" && row.checkCount === 0) return "no_ci";
+  if (row.state === "pass") return "passing_ci";
+  return row.state || "";
+}
+
+function phaseLabel(phase) {
+  return {
+    ci_running: "CI running",
+    merge_pending: "Merging",
+    auto_merge_waiting: "Auto merge",
+    passing_ci: "Passing CI",
+    no_ci: "No CI",
+    failing_ci: "Failing CI",
+    conflicts: "Conflict",
+    action_running: "Workflow running",
+    cd_running: "CD running",
+    deployment_running: "Deployment",
+    runner_busy: "Runner busy"
+  }[phase] || phase || "State";
+}
+
+function phaseThreshold(phase) {
+  return PHASE_THRESHOLDS_MS[phase] || 0;
+}
+
+function rememberPhase(key, phase, fallbackEnteredAt = "") {
+  if (!key || !phase) return null;
+  const now = new Date().toISOString();
+  const previous = state.phaseAges[key];
+  if (previous?.phase === phase) {
+    previous.observedAt = now;
+    return previous;
+  }
+  const fallbackTime = new Date(fallbackEnteredAt || 0).getTime();
+  const enteredAt = Number.isFinite(fallbackTime) && fallbackTime > 0 ? new Date(fallbackTime).toISOString() : now;
+  const next = { phase, enteredAt, observedAt: now };
+  state.phaseAges[key] = next;
+  return next;
+}
+
+function phaseAge(entry) {
+  const entered = new Date(entry?.enteredAt || 0).getTime();
+  return Number.isFinite(entered) ? Math.max(0, Date.now() - entered) : 0;
+}
+
+function decoratePhase(row, phase, key, fallbackEnteredAt = "") {
+  const entry = rememberPhase(key, phase, fallbackEnteredAt);
+  const ageMs = phaseAge(entry);
+  const thresholdMs = phaseThreshold(phase);
+  return {
+    ...row,
+    phase,
+    phaseLabel: phaseLabel(phase),
+    phaseEnteredAt: entry?.enteredAt || "",
+    phaseAgeMs: ageMs,
+    phaseThresholdMs: thresholdMs,
+    phaseStale: Boolean(thresholdMs && ageMs >= thresholdMs)
+  };
+}
+
+function decoratePr(row) {
+  const phase = currentPrPhase(row);
+  return decoratePhase(row, phase, phaseKey(row, phase));
+}
+
+function stalePhaseTraces(rows = []) {
+  return rows
+    .filter((row) => row?.phaseStale)
+    .map((row) => ({
+      id: `stale-phase:${row.phase}:${prKey(row)}`,
+      status: "flagged",
+      severity: row.phase === "merge_pending" || row.phase === "ci_running" ? "high" : "medium",
+      repo: row.repo,
+      prNumber: row.number,
+      numberLabel: row.numberLabel,
+      title: row.title,
+      prUrl: row.url,
+      baseRef: row.baseRefName || "",
+      lastEvidenceAt: row.phaseEnteredAt,
+      reason: `${row.phaseLabel} for ${formatDuration(row.phaseAgeMs)}; expected under ${formatDuration(row.phaseThresholdMs)}.`,
+      rule: { source: "state age" },
+      nextAction: { label: "Open PR", url: row.url },
+      evidence: [
+        { label: `${row.phaseLabel} since ${formatTime(row.phaseEnteredAt) || "first observed"}`, url: row.url }
+      ],
+      stages: [
+        { key: row.phase, label: row.phaseLabel, status: "blocked" }
+      ]
+    }));
+}
+
+function annotateDataWithPhaseAges(data) {
+  if (!data) return data;
+  const pullRequests = {
+    pass: (data.pullRequests?.pass || []).map(decoratePr),
+    noCi: (data.pullRequests?.noCi || []).map(decoratePr),
+    fail: (data.pullRequests?.fail || []).map(decoratePr),
+    running: (data.pullRequests?.running || []).map(decoratePr),
+    conflicts: (data.pullRequests?.conflicts || []).map(decoratePr)
+  };
+  const actions = {
+    ...(data.actions || {}),
+    running: (data.actions?.running || []).map((row) =>
+      decoratePhase(row, "action_running", workflowPhaseKey(row, "action_running"), row.createdAt)
+    )
+  };
+  const cd = {
+    ...(data.cd || {}),
+    running: (data.cd?.running || []).map((row) =>
+      decoratePhase(row, "cd_running", workflowPhaseKey(row, "cd_running"), row.createdAt)
+    )
+  };
+  const deployments = {
+    ...(data.deployments || {}),
+    running: (data.deployments?.running || []).map((row) =>
+      decoratePhase(row, "deployment_running", workflowPhaseKey(row, "deployment_running"), row.createdAt)
+    )
+  };
+  const runners = {
+    ...(data.runners || {}),
+    busy: (data.runners?.busy || []).map((row) =>
+      decoratePhase(row, "runner_busy", workflowPhaseKey(row, "runner_busy"))
+    )
+  };
+  const staleTraces = stalePhaseTraces([
+    ...pullRequests.pass,
+    ...pullRequests.noCi,
+    ...pullRequests.fail,
+    ...pullRequests.running,
+    ...pullRequests.conflicts
+  ]);
+  const traces = groupTraceRows([...staleTraces, ...flattenTraces(data.traces)]);
+  savePhaseAges();
+  return {
+    ...data,
+    pullRequests,
+    actions,
+    cd,
+    deployments,
+    runners,
+    traces,
+    summary: {
+      ...(data.summary || {}),
+      flaggedJourneys: traces.flagged.length,
+      activeJourneys: traces.active.length,
+      shippedJourneys: traces.completed.length,
+      tracingUnknown: traces.unknown.length
+    }
+  };
 }
 
 function mergeKey(repo, number) {
@@ -1124,10 +1338,10 @@ async function refresh({ source = "manual" } = {}) {
       }
       throw new Error(data.error || "Unable to refresh dashboard");
     }
+    if (data.autoMerge) applyAutoMergeSnapshot(data.autoMerge);
     const mergedData = mergeTraceData(data);
     notifyCompletedActions(state.activitySnapshot, mergedData);
     state.activitySnapshot = buildActivitySnapshot(mergedData);
-    if (mergedData.autoMerge) applyAutoMergeSnapshot(mergedData.autoMerge);
     state.data = mergedData;
     state.refreshRetryCount = 0;
     render();
@@ -1514,8 +1728,9 @@ function renderPrRow(row, view) {
   const draftBadge = row.isDraft
     ? `<span class="draft-pill" title="Draft pull request">Draft</span>`
     : "";
+  const phaseBadge = renderPhaseBadge(row);
   return `
-    <article class="row${row.hasConflict ? " row-conflict" : ""}" data-href="${escapeHtml(row.url || "")}" style="--accent: var(--${view.color}); --soft: var(--${view.color}-soft);">
+    <article class="row${row.hasConflict ? " row-conflict" : ""}${row.phaseStale ? " row-stale" : ""}" data-href="${escapeHtml(row.url || "")}" style="--accent: var(--${view.color}); --soft: var(--${view.color}-soft);">
       <div class="row-main">
         <div class="repo">${escapeHtml(row.repo)}</div>
         <div class="title">${escapeHtml(row.title)}</div>
@@ -1525,11 +1740,21 @@ function renderPrRow(row, view) {
         <span class="tag">${escapeHtml(stateLabel)}</span>
         ${conflictBadge}
         ${draftBadge}
+        ${phaseBadge}
       </div>
       <div class="meta">${escapeHtml(detail)}</div>
       ${renderPrActions(row)}
     </article>
   `;
+}
+
+function renderPhaseBadge(row) {
+  if (!row?.phaseEnteredAt) return "";
+  const label = `${row.phaseStale ? "Stale " : ""}${row.phaseLabel || "State"} ${formatDuration(row.phaseAgeMs || 0)}`;
+  const title = row.phaseStale
+    ? `${row.phaseLabel} has been active for ${formatDuration(row.phaseAgeMs)}. Expected under ${formatDuration(row.phaseThresholdMs)}.`
+    : `${row.phaseLabel} since ${formatTime(row.phaseEnteredAt) || "first observed"}.`;
+  return `<span class="phase-pill${row.phaseStale ? " phase-pill-stale" : ""}" title="${escapeHtml(title)}">${escapeHtml(label)}</span>`;
 }
 
 function renderCdRow(row, view, viewKey) {
@@ -1539,14 +1764,15 @@ function renderCdRow(row, view, viewKey) {
     ? [`Reason: ${failureDetail(row, "CD failed")}`, timeDetail].filter(Boolean).join(" · ")
     : timeDetail;
   const tagClass = viewKey === "failedCd" ? `tag tag-${statusClass(status)}` : "tag";
+  const phaseBadge = renderPhaseBadge(row);
   return `
-    <article class="row" data-href="${escapeHtml(row.url || "")}" style="--accent: var(--${view.color}); --soft: var(--${view.color}-soft);">
+    <article class="row${row.phaseStale ? " row-stale" : ""}" data-href="${escapeHtml(row.url || "")}" style="--accent: var(--${view.color}); --soft: var(--${view.color}-soft);">
       <div class="row-main">
         <div class="repo">${escapeHtml(row.repo)}</div>
         <div class="title">${escapeHtml(row.title || row.workflow)}</div>
       </div>
       <div class="meta">${escapeHtml(row.workflow)} ${escapeHtml(row.runNumber)}</div>
-      <div class="${tagClass}">${escapeHtml(status)}</div>
+      <div class="tag-group"><div class="${tagClass}">${escapeHtml(status)}</div>${phaseBadge}</div>
       <div class="meta">${escapeHtml(detail)}</div>
       ${row.url ? `<a class="open-link" href="${escapeHtml(row.url)}" target="_blank" rel="noreferrer">Open Run</a>` : ""}
     </article>
@@ -2003,14 +2229,15 @@ function renderWorkflowRunRow(row, view) {
   const key = dismissKey(row);
   const dismissed = key ? isDismissed(key) : false;
   const dismissButton = key ? renderDismissButton(key, `${row.workflow} ${row.runNumber}`) : "";
+  const phaseBadge = renderPhaseBadge(row);
   return `
-    <article class="row${dismissed ? " row-dismissed" : ""}" data-href="${escapeHtml(row.url || "")}" style="--accent: var(--${view.color}); --soft: var(--${view.color}-soft);">
+    <article class="row${dismissed ? " row-dismissed" : ""}${row.phaseStale ? " row-stale" : ""}" data-href="${escapeHtml(row.url || "")}" style="--accent: var(--${view.color}); --soft: var(--${view.color}-soft);">
       <div class="row-main">
         <div class="repo">${escapeHtml(row.repo)}</div>
         <div class="title">${escapeHtml(row.title || row.workflow)}</div>
       </div>
       <div class="meta">${escapeHtml(row.workflow)} ${escapeHtml(row.runNumber)}</div>
-      <div class="tag">${escapeHtml(status)}</div>
+      <div class="tag-group"><div class="tag">${escapeHtml(status)}</div>${phaseBadge}</div>
       <div class="meta">${escapeHtml(detail)}</div>
       <div class="row-actions">
         ${row.url ? `<a class="open-link" href="${escapeHtml(row.url)}" target="_blank" rel="noreferrer">Open Run</a>` : ""}
@@ -2021,14 +2248,15 @@ function renderWorkflowRunRow(row, view) {
 }
 
 function renderDeploymentRow(row, view) {
+  const phaseBadge = renderPhaseBadge(row);
   return `
-    <article class="row" data-href="${escapeHtml(row.url || "")}" style="--accent: var(--${view.color}); --soft: var(--${view.color}-soft);">
+    <article class="row${row.phaseStale ? " row-stale" : ""}" data-href="${escapeHtml(row.url || "")}" style="--accent: var(--${view.color}); --soft: var(--${view.color}-soft);">
       <div class="row-main">
         <div class="repo">${escapeHtml(row.repo)}</div>
         <div class="title">${escapeHtml(row.environment || "Deployment")}</div>
       </div>
       <div class="meta">${escapeHtml(row.ref)} ${escapeHtml(row.task)}</div>
-      <div class="tag">${escapeHtml(row.state)}</div>
+      <div class="tag-group"><div class="tag">${escapeHtml(row.state)}</div>${phaseBadge}</div>
       <div class="meta">${escapeHtml(row.description)} · ${escapeHtml(formatTime(row.createdAt))}</div>
       ${row.url ? `<a class="open-link" href="${escapeHtml(row.url)}" target="_blank" rel="noreferrer">Open Link</a>` : ""}
     </article>
@@ -2036,14 +2264,15 @@ function renderDeploymentRow(row, view) {
 }
 
 function renderRunnerRow(row) {
+  const phaseBadge = renderPhaseBadge(row);
   return `
-    <article class="row" style="--accent: #87806f; --soft: var(--gray-soft);">
+    <article class="row${row.phaseStale ? " row-stale" : ""}" style="--accent: #87806f; --soft: var(--gray-soft);">
       <div class="row-main">
         <div class="repo">${escapeHtml(row.scope)}</div>
         <div class="title">${escapeHtml(row.name)}</div>
       </div>
       <div class="meta">${escapeHtml(row.level)}</div>
-      <div class="tag">${escapeHtml(row.status || "busy")}</div>
+      <div class="tag-group"><div class="tag">${escapeHtml(row.status || "busy")}</div>${phaseBadge}</div>
       <div class="meta">${escapeHtml((row.labels || []).join(", "))}</div>
       <span></span>
     </article>
