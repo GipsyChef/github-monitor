@@ -97,7 +97,7 @@ jobs:
 
           if (pkg.private === true) failures.push("package.json must not set private=true");
           if (pkg.license !== "MIT") failures.push("package.json license must be MIT");
-          if (!pkg.repository?.url?.includes("github.com/GipsyChef/github-monitor")) {
+          if (!pkg.repository?.url?.includes("github.com/ryabinski-labs/github-monitor")) {
             failures.push("package.json repository URL must point to this repository");
           }
           if (!pkg.scripts?.test) failures.push("package.json must define npm test");

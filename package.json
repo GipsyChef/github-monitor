@@ -5,13 +5,13 @@
   "type": "module",
   "license": "MIT",
   "author": "Yoni",
-  "homepage": "https://github.com/GipsyChef/github-monitor#readme",
+  "homepage": "https://github.com/ryabinski-labs/github-monitor#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/GipsyChef/github-monitor.git"
+    "url": "git+https://github.com/ryabinski-labs/github-monitor.git"
   },
   "bugs": {
-    "url": "https://github.com/GipsyChef/github-monitor/issues"
+    "url": "https://github.com/ryabinski-labs/github-monitor/issues"
   },
   "keywords": [
     "github",

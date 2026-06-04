@@ -1,10 +1,10 @@
 # Sensitive project governance and automation paths require maintainer review.
-/.github/ @GipsyChef
-/SECURITY.md @GipsyChef
-/CODE_OF_CONDUCT.md @GipsyChef
-/CONTRIBUTING.md @GipsyChef
-/MAINTAINERS.md @GipsyChef
-/LICENSE @GipsyChef
-/package.json @GipsyChef
-/package-lock.json @GipsyChef
-/server.js @GipsyChef
+/.github/ @ryabinski-labs
+/SECURITY.md @ryabinski-labs
+/CODE_OF_CONDUCT.md @ryabinski-labs
+/CONTRIBUTING.md @ryabinski-labs
+/MAINTAINERS.md @ryabinski-labs
+/LICENSE @ryabinski-labs
+/package.json @ryabinski-labs
+/package-lock.json @ryabinski-labs
+/server.js @ryabinski-labs
