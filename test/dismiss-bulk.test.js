@@ -14,10 +14,23 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { chromium } from "playwright";
+
+// These tests drive a real Chromium via Playwright. CI installs the browser
+// (see .github/workflows/ci.yml); when it is missing locally, skip with a clear
+// hint instead of failing with Playwright's raw "Executable doesn't exist" error.
+let browserMissing = false;
+try {
+  browserMissing = !existsSync(chromium.executablePath());
+} catch {
+  browserMissing = true;
+}
+const skip = browserMissing
+  ? "Playwright Chromium not installed — run: npx playwright install chromium"
+  : false;
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const indexHtml = readFileSync(path.join(root, "public/index.html"), "utf8");
@@ -139,7 +152,7 @@ async function openDashboard({ view = "pipelineTraces", failedRuns = [] } = {}) 
 const pillCount = (page, key) =>
   page.locator(`.trace-filterbar button[data-trace-filter="${key}"] strong`).innerText();
 
-test("Dismiss all is hidden when only one dismissable row is visible", async () => {
+test("Dismiss all is hidden when only one dismissable row is visible", { skip }, async () => {
   const { browser, page } = await openDashboard();
   try {
     // Default sub-tab is "flagged" with a single journey.
@@ -152,7 +165,7 @@ test("Dismiss all is hidden when only one dismissable row is visible", async () 
   }
 });
 
-test("Dismiss all clears the lane and Restore all brings it back, with synced pill counts", async () => {
+test("Dismiss all clears the lane and Restore all brings it back, with synced pill counts", { skip }, async () => {
   const { browser, page } = await openDashboard();
   try {
     // Switch to the unknown sub-tab (three journeys).
@@ -187,7 +200,7 @@ test("Dismiss all clears the lane and Restore all brings it back, with synced pi
   }
 });
 
-test("Dismiss all works on the Failing CI lane (workflow-run rows)", async () => {
+test("Dismiss all works on the Failing CI lane (workflow-run rows)", { skip }, async () => {
   const { browser, page } = await openDashboard({
     view: "fail",
     failedRuns: [workflowRun("acme/alpha", 101), workflowRun("acme/bravo", 102)]
