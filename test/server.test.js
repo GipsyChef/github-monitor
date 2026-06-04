@@ -27,6 +27,8 @@ import {
   isBackendUrl,
   runOutcome,
   buildPipelineTraces,
+  isDeployNeutralFile,
+  mergedPrIsDeployNeutral,
   selectFailedActionRuns,
   selectFailedCdRuns,
   findSupersedingSuccessfulRun,
@@ -1038,6 +1040,121 @@ test("pipeline traces keep unmapped repositories separate from failures", () => 
   assert.equal(traces.unknown.length, 1);
   assert.equal(traces.flagged.length, 0);
   assert.match(traces.unknown[0].reason, /No production workflow/);
+});
+
+test("isDeployNeutralFile recognizes changelog/docs/repo-metadata", () => {
+  assert.equal(isDeployNeutralFile("CHANGELOG.md"), true);
+  assert.equal(isDeployNeutralFile("docs/CHANGELOG.md"), true);
+  assert.equal(isDeployNeutralFile("CHANGELOG"), true);
+  assert.equal(isDeployNeutralFile("HISTORY.md"), true);
+  assert.equal(isDeployNeutralFile("README.md"), true);
+  assert.equal(isDeployNeutralFile("LICENSE"), true);
+  assert.equal(isDeployNeutralFile(".gitignore"), true);
+  assert.equal(isDeployNeutralFile("src/app/page.jsx"), false);
+  assert.equal(isDeployNeutralFile("server.js"), false);
+  assert.equal(isDeployNeutralFile("styles/changelog.css"), false);
+});
+
+test("mergedPrIsDeployNeutral requires every file to be deploy-neutral", () => {
+  assert.equal(mergedPrIsDeployNeutral([{ filename: "CHANGELOG.md" }]), true);
+  assert.equal(mergedPrIsDeployNeutral([{ filename: "CHANGELOG.md" }, { filename: "README.md" }]), true);
+  assert.equal(mergedPrIsDeployNeutral([{ filename: "CHANGELOG.md" }, { filename: "src/index.js" }]), false);
+  // Unknown file list (not fetched) must not suppress a flag.
+  assert.equal(mergedPrIsDeployNeutral([]), false);
+});
+
+test("pipeline traces do not flag a changelog-only merged PR with no matching CD run", () => {
+  const traces = buildPipelineTraces({
+    now: Date.parse("2026-06-01T12:00:00Z"),
+    includeCd: true,
+    pullRequests: [],
+    mergedPullRequestsByRepo: new Map([
+      ["ryabinski-labs/nightlamp", [
+        {
+          pr: {
+            number: 447,
+            title: "Update changelog",
+            html_url: "https://github.com/ryabinski-labs/nightlamp/pull/447",
+            merged_at: "2026-06-01T11:00:00Z",
+            head: { sha: "feed01" },
+            merge_commit_sha: "feed02",
+            base: { ref: "main" },
+            user: { login: "dev" }
+          },
+          files: [{ filename: "CHANGELOG.md", status: "modified" }]
+        }
+      ]]
+    ]),
+    // CD evidence exists for the repo, but none of it matches this PR.
+    cdRowsByRepo: new Map([
+      ["ryabinski-labs/nightlamp", [
+        {
+          repo: "ryabinski-labs/nightlamp",
+          workflow: "Deploy Production",
+          runNumber: "#900",
+          status: "completed",
+          conclusion: "success",
+          outcome: "success",
+          branch: "release/other",
+          headSha: "0000ff",
+          createdAt: "2026-05-30T10:00:00Z",
+          updatedAt: "2026-05-30T10:05:00Z",
+          url: "https://github.com/ryabinski-labs/nightlamp/actions/runs/900"
+        }
+      ]]
+    ])
+  });
+
+  assert.equal(traces.flagged.length, 0);
+  assert.equal(traces.completed.length, 1);
+  assert.equal(traces.completed[0].id, "ryabinski-labs/nightlamp#447");
+  assert.match(traces.completed[0].reason, /No production deploy expected/);
+});
+
+test("pipeline traces still flag a merged PR that mixes code with changelog", () => {
+  const traces = buildPipelineTraces({
+    now: Date.parse("2026-06-01T12:00:00Z"),
+    includeCd: true,
+    pullRequests: [],
+    mergedPullRequestsByRepo: new Map([
+      ["ryabinski-labs/nightlamp", [
+        {
+          pr: {
+            number: 448,
+            title: "Ship feature and update changelog",
+            html_url: "https://github.com/ryabinski-labs/nightlamp/pull/448",
+            merged_at: "2026-06-01T11:00:00Z",
+            head: { sha: "abc999" },
+            merge_commit_sha: "def999",
+            base: { ref: "main" },
+            user: { login: "dev" }
+          },
+          files: [{ filename: "CHANGELOG.md" }, { filename: "src/app/page.jsx" }]
+        }
+      ]]
+    ]),
+    cdRowsByRepo: new Map([
+      ["ryabinski-labs/nightlamp", [
+        {
+          repo: "ryabinski-labs/nightlamp",
+          workflow: "Deploy Production",
+          runNumber: "#901",
+          status: "completed",
+          conclusion: "success",
+          outcome: "success",
+          branch: "release/other",
+          headSha: "0000ff",
+          createdAt: "2026-05-30T10:00:00Z",
+          updatedAt: "2026-05-30T10:05:00Z",
+          url: "https://github.com/ryabinski-labs/nightlamp/actions/runs/901"
+        }
+      ]]
+    ])
+  });
+
+  assert.equal(traces.flagged.length, 1);
+  assert.equal(traces.flagged[0].id, "ryabinski-labs/nightlamp#448");
+  assert.match(traces.flagged[0].reason, /no matching production CD run/i);
 });
 
 test("dashboard scoreboard surfaces skipped CD runs without a new lane", () => {

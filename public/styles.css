@@ -1671,7 +1671,8 @@ button.metric.active .metric-dot {
 .trace-stage-active .trace-stage-dot { background: var(--blue); }
 .trace-stage-blocked .trace-stage-dot,
 .trace-stage-missing .trace-stage-dot { background: var(--red); }
-.trace-stage-unknown .trace-stage-dot { background: var(--gray); }
+.trace-stage-unknown .trace-stage-dot,
+.trace-stage-skipped .trace-stage-dot { background: var(--gray); }
 .trace-stage-blocked,
 .trace-stage-missing {
   border-color: color-mix(in srgb, var(--red) 24%, var(--line));

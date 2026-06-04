@@ -1008,7 +1008,7 @@ function notifyCompletedActions(previousSnapshot, data) {
     } else if (trace.status === "completed" && previous && previous.status !== "completed") {
       sendPopup(
         "Pipeline complete",
-        `${trace.repo} ${trace.numberLabel || `#${trace.prNumber}`}: production CD completed.`,
+        `${trace.repo} ${trace.numberLabel || `#${trace.prNumber}`}: ${trace.reason || "production CD completed."}`,
         `trace:${key}:completed`,
         { url: trace.nextAction?.url || trace.prUrl, kind: "trace", tone: "success" }
       );
@@ -1794,6 +1794,7 @@ function traceStatusLabel(status) {
     blocked: "Blocked",
     missing: "Missing",
     pending: "Pending",
+    skipped: "Skipped",
     unknown: "Unknown"
   }[status] || status || "Pending";
 }
