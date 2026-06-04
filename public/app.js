@@ -321,6 +321,37 @@ function restoreRow(key) {
   render();
 }
 
+// Dismiss keys for the active view's dismissable rows, honoring the text
+// filter — the same set the list and the dismiss bar are built from. Backs the
+// "Dismiss all" / "Restore all" bulk controls so they affect exactly what the
+// user can currently see, never hidden lanes or filtered-out rows.
+function visibleDismissKeys() {
+  const data = state.data;
+  const view = data && views[state.view];
+  if (!view) return [];
+  const query = state.filter.trim().toLowerCase();
+  const rows = view.rows(data) || [];
+  const filtered = query ? rows.filter((row) => rowText(row).includes(query)) : rows;
+  return filtered.map((row) => dismissKey(row)).filter(Boolean);
+}
+
+function dismissAllVisible() {
+  const keys = visibleDismissKeys().filter((key) => !state.dismissed[key]);
+  if (!keys.length) return;
+  const now = new Date().toISOString();
+  keys.forEach((key) => { state.dismissed[key] = now; });
+  saveDismissed();
+  render();
+}
+
+function restoreAllVisible() {
+  const keys = visibleDismissKeys().filter((key) => state.dismissed[key]);
+  if (!keys.length) return;
+  keys.forEach((key) => { delete state.dismissed[key]; });
+  saveDismissed();
+  render();
+}
+
 function pruneInbox(items) {
   const cutoff = Date.now() - INBOX_TTL_MS;
   return items
@@ -1547,7 +1578,14 @@ function render() {
   const all = view.rows(data);
   const filtered = query ? all.filter((row) => rowText(row).includes(query)) : all;
 
-  const dismissedCount = filtered.filter((row) => { const k = dismissKey(row); return k && isDismissed(k); }).length;
+  let dismissedCount = 0;
+  let activeDismissable = 0;
+  for (const row of filtered) {
+    const k = dismissKey(row);
+    if (!k) continue;
+    if (isDismissed(k)) dismissedCount += 1;
+    else activeDismissable += 1;
+  }
   const rows = state.showDismissed
     ? filtered
     : filtered.filter((row) => { const k = dismissKey(row); return !(k && isDismissed(k)); });
@@ -1556,7 +1594,7 @@ function render() {
   const body = rows.length
     ? rows.map((row) => renderRow(row, state.view, view)).join("")
     : renderEmptyState(view, all.length);
-  const dismissBar = dismissedCount ? renderDismissBar(dismissedCount) : "";
+  const dismissBar = renderDismissBar(dismissedCount, activeDismissable);
   els.content.innerHTML = `${state.view === "pipelineTraces" ? renderTraceFilterBar(data) : ""}${dismissBar}${body}`;
 }
 
@@ -1583,24 +1621,50 @@ function renderDismissButton(key, label) {
   >${dismissed ? "Restore" : "Dismiss"}</button>`;
 }
 
-function renderDismissBar(count) {
-  const noun = count === 1 ? "item" : "items";
+// Bar above the list that holds the bulk dismiss/restore controls. "Dismiss
+// all" surfaces only when there are at least two actionable rows (a single row
+// already has its own per-row button, so the bulk control would be redundant).
+// Dismissals are fully reversible — "Restore all" plus the per-row Restore act
+// as the undo, so no confirmation dialog is needed for this low-stakes action.
+function renderDismissBar(dismissedCount, activeCount) {
+  const showDismissAll = activeCount >= 2;
+  if (!dismissedCount && !showDismissAll) return "";
+
+  let label;
+  if (dismissedCount) {
+    label = `${dismissedCount} dismissed ${dismissedCount === 1 ? "item" : "items"}`;
+  } else {
+    label = `${activeCount} ${activeCount === 1 ? "item" : "items"} shown`;
+  }
+
+  const actions = [];
+  if (showDismissAll) {
+    actions.push(`<button type="button" class="dismiss-action" data-dismiss-all title="Dismiss all ${activeCount} items shown">Dismiss all</button>`);
+  }
+  if (dismissedCount) {
+    actions.push(`<button type="button" class="dismiss-toggle" data-dismiss-toggle>${state.showDismissed ? "Hide" : "Show"}</button>`);
+    actions.push(`<button type="button" class="dismiss-action" data-restore-all title="Restore all ${dismissedCount} dismissed ${dismissedCount === 1 ? "item" : "items"}">Restore all</button>`);
+  }
+
   return `
     <div class="dismiss-bar">
-      <span class="dismiss-bar-label">${count} dismissed ${noun}</span>
-      <button type="button" class="dismiss-toggle" data-dismiss-toggle>
-        ${state.showDismissed ? "Hide" : "Show"}
-      </button>
+      <span class="dismiss-bar-label">${label}</span>
+      <span class="dismiss-bar-spacer"></span>
+      ${actions.join("")}
     </div>
   `;
 }
 
 function renderTraceFilterBar(data) {
+  // Use displayCounts (not raw summary) so the sub-tab pills reflect locally
+  // dismissed flagged/unknown journeys — keeping them in sync with the
+  // scoreboard tiles, the rail count, and the "Dismiss all" / list below.
+  const display = displayCounts(data);
   const counts = {
-    flagged: data?.summary?.flaggedJourneys || 0,
-    active: data?.summary?.activeJourneys || 0,
-    completed: data?.summary?.shippedJourneys || 0,
-    unknown: data?.summary?.tracingUnknown || 0
+    flagged: display.flaggedJourneys || 0,
+    active: display.activeJourneys || 0,
+    completed: display.shippedJourneys || 0,
+    unknown: display.tracingUnknown || 0
   };
   const total = Object.values(counts).reduce((sum, value) => sum + Number(value || 0), 0);
   const options = [
@@ -2761,6 +2825,20 @@ els.content.addEventListener("click", (event) => {
     const key = dismissButton.getAttribute("data-dismiss-key");
     if (dismissButton.getAttribute("data-dismiss-action") === "restore") restoreRow(key);
     else dismissRow(key);
+    return;
+  }
+  const dismissAll = event.target.closest("[data-dismiss-all]");
+  if (dismissAll) {
+    event.preventDefault();
+    event.stopPropagation();
+    dismissAllVisible();
+    return;
+  }
+  const restoreAll = event.target.closest("[data-restore-all]");
+  if (restoreAll) {
+    event.preventDefault();
+    event.stopPropagation();
+    restoreAllVisible();
     return;
   }
   const toggle = event.target.closest("[data-dismiss-toggle]");

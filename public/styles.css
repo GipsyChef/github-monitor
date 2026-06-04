@@ -897,7 +897,10 @@ button.metric.active .metric-dot {
   color: var(--muted-strong);
 }
 
-.dismiss-toggle {
+.dismiss-bar-spacer { flex: 1 1 auto; }
+
+.dismiss-toggle,
+.dismiss-action {
   min-height: 26px;
   padding: 0 12px;
   border: 1px solid var(--line-strong);
@@ -908,9 +911,12 @@ button.metric.active .metric-dot {
   font-weight: 600;
   letter-spacing: 0.02em;
   color: var(--ink);
-  transition: border-color 160ms ease;
+  transition: border-color 160ms ease, color 160ms ease;
 }
-.dismiss-toggle:hover { border-color: var(--ink); }
+.dismiss-toggle:hover,
+.dismiss-action:hover { border-color: var(--ink); }
+.dismiss-toggle:focus-visible,
+.dismiss-action:focus-visible { outline: 2px solid var(--accent, var(--ink)); outline-offset: 2px; }
 
 /* Secondary action — quieter than the bordered Open Run primary. */
 .row-dismiss {
