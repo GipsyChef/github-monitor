@@ -160,7 +160,13 @@ const FAILED_CD_MAX_AGE_MS = 3 * 24 * 60 * 60 * 1000;
 const FINISHED_CD_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const CHANGE_FILE_LINK_LIMIT = 14;
 const MERGED_PR_SUMMARY_LIMIT = 10;
-const MERGED_PR_FILE_DETAIL_FETCH_LIMIT = 4;
+// Fetch changed files for every merged PR in the trace window, not just the few
+// shown in the summary UI: pipeline traces use the file list to tell whether a
+// merged PR actually warranted a production deploy (see mergedPrIsDeployNeutral).
+// Without files, a changelog/docs-only PR would be wrongly flagged as "no
+// matching production CD run yet". File responses are cached per PR for
+// MERGED_PR_CACHE_TTL_MS and fetched against the core (not search) rate limit.
+const MERGED_PR_FILE_DETAIL_FETCH_LIMIT = MERGED_PR_SUMMARY_LIMIT;
 const MERGED_PR_FILE_LINK_LIMIT = 6;
 const PRODUCTION_TARGET_SCAN_LIMIT = 40;
 const PRODUCTION_TARGET_MAX_FILE_BYTES = 260000;
@@ -2076,6 +2082,35 @@ function buildOpenPullRequestTrace(pr, { now = Date.now() } = {}) {
   };
 }
 
+// Files whose changes never alter what production serves. A merged PR that only
+// touches these does not trigger (and does not need) a production CD run, so it
+// should not be flagged for "no matching production CD run". Matched on the
+// basename so the path/directory does not matter (e.g. docs/CHANGELOG.md).
+function isDeployNeutralFile(filename) {
+  const path = String(filename || "").replaceAll("\\", "/").trim().toLowerCase();
+  if (!path) return false;
+  const base = path.split("/").pop();
+  // Release notes and repo metadata: CHANGELOG.md, HISTORY, AUTHORS, LICENSE, etc.
+  // Only a documentation/plain-text extension (or none) counts, so a code file
+  // that happens to share the name (e.g. changelog.css) is not treated as neutral.
+  if (/^(changelog|changes|history|releases?|release[-_.]?notes|readme|authors|contributors|codeowners|license|licence|copying|notice|contributing|code[-_]of[-_]conduct|security|support|funding)(\.(md|markdown|mdx|txt|rst|adoc))?$/.test(base)) {
+    return true;
+  }
+  // Dotfiles that only affect tooling/repo hygiene, never the deployed app.
+  if (/^\.(gitignore|gitattributes|editorconfig|npmignore|nvmrc|prettierignore|prettierrc|gitkeep)$/.test(base)) {
+    return true;
+  }
+  return false;
+}
+
+// True only when we have the changed-file list AND every changed file is
+// deploy-neutral. Returns false when files are unknown (empty) so we never
+// suppress a flag without positive evidence the PR could not have deployed.
+function mergedPrIsDeployNeutral(files = []) {
+  if (!Array.isArray(files) || files.length === 0) return false;
+  return files.every((file) => isDeployNeutralFile(file?.filename || file?.path || ""));
+}
+
 function buildMergedPullRequestTrace(pr, cdRows, { now = Date.now(), includeCd = true } = {}) {
   const startedAt = pr.mergedAt || pr.closedAt || new Date(now).toISOString();
   const matching = cdRows.filter((run) => cdRunMatchesPr(run, pr)).sort(sortByCreatedDesc);
@@ -2116,6 +2151,10 @@ function buildMergedPullRequestTrace(pr, cdRows, { now = Date.now(), includeCd =
       maxStageAgeMinutes: TRACE_PROD_COMPLETE_SLA_MS / 60000
     }
   };
+
+  // A PR that only touches changelog/docs/repo-metadata never deploys, so the
+  // absence of a production CD run is expected rather than a problem to flag.
+  const deployNeutral = mergedPrIsDeployNeutral(pr.files);
 
   if (!includeCd) {
     return {
@@ -2159,6 +2198,18 @@ function buildMergedPullRequestTrace(pr, cdRows, { now = Date.now(), includeCd =
 
   if (skipped.length) {
     const skip = skipped[0];
+    if (deployNeutral) {
+      return {
+        ...base,
+        stage: "prod_complete",
+        status: "completed",
+        severity: "low",
+        reason: "CD skipped as expected — this PR only changes changelog/docs, so production was not updated.",
+        nextAction: { label: "Open skipped run", url: skip.url },
+        lastEvidenceAt: skip.updatedAt || skip.createdAt || base.lastEvidenceAt,
+        stages: stages.map((stage) => stage.key === "prod_complete" ? { ...stage, status: "skipped", at: skip.createdAt, url: skip.url } : stage)
+      };
+    }
     return {
       ...base,
       stage: "prod_complete",
@@ -2196,6 +2247,18 @@ function buildMergedPullRequestTrace(pr, cdRows, { now = Date.now(), includeCd =
       reason: "No production workflow or deployment environment was detected for this repository.",
       nextAction: { label: "Open PR", url: pr.url },
       stages: stages.map((stage) => stage.key === "cd_started" || stage.key === "prod_complete" ? { ...stage, status: "unknown" } : stage)
+    };
+  }
+
+  if (deployNeutral) {
+    return {
+      ...base,
+      stage: "cd_started",
+      status: "completed",
+      severity: "low",
+      reason: "No production deploy expected — this PR only changes changelog/docs, which does not run CD.",
+      nextAction: { label: "Open PR", url: pr.url },
+      stages: stages.map((stage) => stage.key === "cd_started" || stage.key === "prod_complete" ? { ...stage, status: "skipped" } : stage)
     };
   }
 
@@ -3174,6 +3237,8 @@ export {
   recommendRefresh,
   runOutcome,
   cdRunMatchesPr,
+  isDeployNeutralFile,
+  mergedPrIsDeployNeutral,
   buildPipelineTraces,
   selectFailedActionRuns,
   selectFailedCdRuns,
