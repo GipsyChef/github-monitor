@@ -1,5 +1,5 @@
 blank_issues_enabled: false
 contact_links:
   - name: Security vulnerability
-    url: https://github.com/GipsyChef/github-monitor/security/advisories/new
+    url: https://github.com/ryabinski-labs/github-monitor/security/advisories/new
     about: Please report suspected vulnerabilities privately.
