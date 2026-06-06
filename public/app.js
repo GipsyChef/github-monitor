@@ -2,10 +2,19 @@ const STORAGE_KEY = "pr-deck:v1";
 const INBOX_KEY = "pr-deck:inbox:v1";
 const TRACE_CACHE_KEY = "pr-deck:traces:v1";
 const PHASE_AGE_KEY = "pr-deck:phase-ages:v1";
+const NOTIFIED_KEY = "pr-deck:notified:v1";
 const INBOX_MAX = 60;
 const INBOX_TTL_MS = 24 * 60 * 60 * 1000;
 const TRACE_CACHE_MAX = 250;
 const TRACE_COMPLETED_TTL_MS = 24 * 60 * 60 * 1000;
+// Suppress notifications for events whose evidence is older than this — keeps
+// the inbox from re-announcing work that happened days ago.
+const NOTIFY_STALE_EVENT_MS = 3 * 24 * 60 * 60 * 1000;
+// How long a fired notification tag stays "already announced" without being seen
+// again. Sightings refresh the entry, so a condition that persists never re-fires;
+// once it clears and stays gone past this window, a fresh recurrence may notify.
+const NOTIFIED_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const NOTIFIED_MAX = 1000;
 const PHASE_AGE_MAX = 500;
 const PHASE_AGE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const PHASE_THRESHOLDS_MS = {
@@ -58,6 +67,7 @@ const state = {
   inbox: loadInbox(),
   traceCache: loadTraceCache(),
   phaseAges: loadPhaseAges(),
+  notified: loadNotified(),
   dismissed: loadDismissed(),
   showDismissed: false,
   autoMerge: persisted.autoMerge === true,
@@ -269,6 +279,49 @@ function loadPhaseAges() {
   } catch {
     return {};
   }
+}
+
+function pruneNotified(map) {
+  const cutoff = Date.now() - NOTIFIED_TTL_MS;
+  const entries = Object.entries(map || {})
+    .map(([tag, at]) => [tag, new Date(at).getTime()])
+    .filter(([, time]) => Number.isFinite(time) && time >= cutoff)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, NOTIFIED_MAX);
+  const pruned = {};
+  for (const [tag, time] of entries) pruned[tag] = new Date(time).toISOString();
+  return pruned;
+}
+
+function loadNotified() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(NOTIFIED_KEY) || "{}");
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+    return pruneNotified(raw);
+  } catch {
+    return {};
+  }
+}
+
+function saveNotified() {
+  try {
+    state.notified = pruneNotified(state.notified);
+    localStorage.setItem(NOTIFIED_KEY, JSON.stringify(state.notified));
+  } catch {}
+}
+
+function wasNotified(tag) {
+  if (!tag) return false;
+  const at = new Date(state.notified[tag] || 0).getTime();
+  return Number.isFinite(at) && at >= Date.now() - NOTIFIED_TTL_MS;
+}
+
+// Records that a notification tag fired (or was seen still-active) so the same
+// event does not re-announce across reloads, restarts, or scan-window flicker.
+function markNotified(tag) {
+  if (!tag) return;
+  state.notified[tag] = new Date().toISOString();
+  saveNotified();
 }
 
 function loadDismissed() {
@@ -967,6 +1020,11 @@ function recordInbox(entry) {
 }
 
 async function sendPopup(title, body, tag, options = {}) {
+  // A tag we have already announced (and keep seeing) must not re-notify — this
+  // is what stops the same flagged pipeline from re-appearing in the inbox over
+  // and over after reloads, restarts, or a trace flickering out of the scan.
+  if (wasNotified(tag)) return;
+  markNotified(tag);
   recordInbox({
     title,
     body,
@@ -1027,15 +1085,29 @@ function notifyCompletedActions(previousSnapshot, data) {
     );
   }
 
+  const staleEventCutoff = Date.now() - NOTIFY_STALE_EVENT_MS;
   for (const [key, trace] of nextSnapshot.traces || []) {
     const previous = previousSnapshot.traces?.get(key);
     if (trace.status === "flagged" && previous?.status !== "flagged") {
+      const flaggedTag = `trace:${key}:flagged`;
+      const eventTime = traceTimestamp(trace);
+      // Skip events whose latest evidence is days old — the user does not want to
+      // be re-alerted about pipelines that were flagged long ago. A genuinely new
+      // flag carries a recent evidence timestamp and still notifies.
+      if (eventTime && eventTime < staleEventCutoff) {
+        markNotified(flaggedTag);
+        continue;
+      }
       sendPopup(
         "Pipeline flagged",
         `${trace.repo} ${trace.numberLabel || `#${trace.prNumber}`}: ${trace.reason || trace.title}`,
-        `trace:${key}:flagged`,
+        flaggedTag,
         { url: trace.nextAction?.url || trace.prUrl, kind: "trace", tone: "danger" }
       );
+    } else if (trace.status === "flagged") {
+      // Still flagged from a prior scan: keep the dedup entry warm so a long-lived
+      // condition never ages past the window and re-announces itself.
+      if (wasNotified(`trace:${key}:flagged`)) markNotified(`trace:${key}:flagged`);
     } else if (trace.status === "completed" && previous && previous.status !== "completed") {
       sendPopup(
         "Pipeline complete",
