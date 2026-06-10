@@ -356,10 +356,6 @@ function saveDismissed() {
   } catch {}
 }
 
-function isDismissed(key) {
-  return Boolean(key && state.dismissed[key]);
-}
-
 function dismissRow(key) {
   if (!key || state.dismissed[key]) return;
   state.dismissed[key] = new Date().toISOString();
@@ -367,9 +363,10 @@ function dismissRow(key) {
   render();
 }
 
-function restoreRow(key) {
-  if (!key || !state.dismissed[key]) return;
-  delete state.dismissed[key];
+function restoreRow(keys) {
+  const list = normalizeDismissKeys(keys);
+  if (!list.some((key) => state.dismissed[key])) return;
+  list.forEach((key) => { delete state.dismissed[key]; });
   saveDismissed();
   render();
 }
@@ -378,29 +375,29 @@ function restoreRow(key) {
 // filter — the same set the list and the dismiss bar are built from. Backs the
 // "Dismiss all" / "Restore all" bulk controls so they affect exactly what the
 // user can currently see, never hidden lanes or filtered-out rows.
-function visibleDismissKeys() {
+function visibleDismissKeyGroups() {
   const data = state.data;
   const view = data && views[state.view];
   if (!view) return [];
   const query = state.filter.trim().toLowerCase();
   const rows = view.rows(data) || [];
   const filtered = query ? rows.filter((row) => rowText(row).includes(query)) : rows;
-  return filtered.map((row) => dismissKey(row)).filter(Boolean);
+  return filtered.map((row) => dismissKeys(row)).filter((keys) => keys.length);
 }
 
 function dismissAllVisible() {
-  const keys = visibleDismissKeys().filter((key) => !state.dismissed[key]);
-  if (!keys.length) return;
+  const groups = visibleDismissKeyGroups().filter((keys) => !anyDismissed(keys));
+  if (!groups.length) return;
   const now = new Date().toISOString();
-  keys.forEach((key) => { state.dismissed[key] = now; });
+  groups.forEach((keys) => { state.dismissed[keys[0]] = now; });
   saveDismissed();
   render();
 }
 
 function restoreAllVisible() {
-  const keys = visibleDismissKeys().filter((key) => state.dismissed[key]);
-  if (!keys.length) return;
-  keys.forEach((key) => { delete state.dismissed[key]; });
+  const groups = visibleDismissKeyGroups().filter((keys) => anyDismissed(keys));
+  if (!groups.length) return;
+  groups.flat().forEach((key) => { delete state.dismissed[key]; });
   saveDismissed();
   render();
 }
@@ -560,6 +557,35 @@ function traceKey(row) {
 
 function traceDismissKey(row) {
   return `trace:${traceKey(row)}`;
+}
+
+function uniqueTruthy(values) {
+  return [...new Set(values.filter(Boolean).map(String))];
+}
+
+function traceDismissKeys(row) {
+  const repo = row?.repo || "";
+  const number = row?.prNumber || row?.number || "";
+  const canonical = traceDismissKey(row);
+  return uniqueTruthy([
+    canonical,
+    repo && number ? `trace:${repo}#${number}` : "",
+    repo && number ? `trace:${repo}:${number}` : "",
+    row?.prUrl ? `trace:${row.prUrl}` : "",
+    row?.url ? `trace:${row.url}` : ""
+  ]);
+}
+
+function normalizeDismissKeys(keys) {
+  return Array.isArray(keys) ? uniqueTruthy(keys) : uniqueTruthy([keys]);
+}
+
+function matchingDismissKey(keys) {
+  return normalizeDismissKeys(keys).find((key) => state.dismissed[key]) || "";
+}
+
+function anyDismissed(keys) {
+  return Boolean(matchingDismissKey(keys));
 }
 
 function flattenTraces(traces) {
@@ -1466,8 +1492,8 @@ function updateTabTitle(data) {
 function dismissedInLane(rows, keyFn) {
   if (!Array.isArray(rows)) return 0;
   return rows.reduce((count, row) => {
-    const key = keyFn(row);
-    return count + (key && isDismissed(key) ? 1 : 0);
+    const keys = normalizeDismissKeys(keyFn(row));
+    return count + (keys.length && anyDismissed(keys) ? 1 : 0);
   }, 0);
 }
 
@@ -1481,8 +1507,8 @@ function adjustedSummary(data) {
   return {
     ...summary,
     failingPrs: Math.max(0, (summary.failingPrs ?? 0) - dismissedInLane(data?.actions?.failed, actionKey)),
-    flaggedJourneys: Math.max(0, (summary.flaggedJourneys ?? 0) - dismissedInLane(data?.traces?.flagged, traceDismissKey)),
-    tracingUnknown: Math.max(0, (summary.tracingUnknown ?? 0) - dismissedInLane(data?.traces?.unknown, traceDismissKey))
+    flaggedJourneys: Math.max(0, (summary.flaggedJourneys ?? 0) - dismissedInLane(data?.traces?.flagged, traceDismissKeys)),
+    tracingUnknown: Math.max(0, (summary.tracingUnknown ?? 0) - dismissedInLane(data?.traces?.unknown, traceDismissKeys))
   };
 }
 
@@ -1491,18 +1517,18 @@ function filteredVisibleRows(rows, isDismissable = () => false) {
   const list = Array.isArray(rows) ? rows : [];
   return list.filter((row) => {
     if (query && !rowText(row).includes(query)) return false;
-    const key = isDismissable(row);
-    return !(key && isDismissed(key));
+    const keys = normalizeDismissKeys(isDismissable(row));
+    return !(keys.length && anyDismissed(keys));
   });
 }
 
 function displayCounts(data) {
   const counts = adjustedSummary(data);
   if (!state.filter.trim()) return counts;
-  const traceFlagged = filteredVisibleRows(data?.traces?.flagged, traceDismissKey).length;
+  const traceFlagged = filteredVisibleRows(data?.traces?.flagged, traceDismissKeys).length;
   const traceActive = filteredVisibleRows(data?.traces?.active).length;
   const traceCompleted = filteredVisibleRows(data?.traces?.completed).length;
-  const traceUnknown = filteredVisibleRows(data?.traces?.unknown, traceDismissKey).length;
+  const traceUnknown = filteredVisibleRows(data?.traces?.unknown, traceDismissKeys).length;
   return {
     ...counts,
     passingPrs: filteredVisibleRows(data?.pullRequests?.pass).length,
@@ -1653,14 +1679,14 @@ function render() {
   let dismissedCount = 0;
   let activeDismissable = 0;
   for (const row of filtered) {
-    const k = dismissKey(row);
-    if (!k) continue;
-    if (isDismissed(k)) dismissedCount += 1;
+    const keys = dismissKeys(row);
+    if (!keys.length) continue;
+    if (anyDismissed(keys)) dismissedCount += 1;
     else activeDismissable += 1;
   }
   const rows = state.showDismissed
     ? filtered
-    : filtered.filter((row) => { const k = dismissKey(row); return !(k && isDismissed(k)); });
+    : filtered.filter((row) => { const keys = dismissKeys(row); return !(keys.length && anyDismissed(keys)); });
   syncFilterUI(rows.length, all.length);
 
   const body = rows.length
@@ -1670,19 +1696,23 @@ function render() {
   els.content.innerHTML = `${state.view === "pipelineTraces" ? renderTraceFilterBar(data) : ""}${dismissBar}${body}`;
 }
 
-// Returns a stable dismiss key for a dismissable row, else null. Failing-CI
-// workflow runs are dismissable; so are flagged/unknown pipeline traces.
-function dismissKey(row) {
-  if (!row) return null;
-  if (state.view === "fail" && row.kind === "workflowRun") return actionKey(row);
+// Returns stable dismiss keys for a dismissable row, else an empty array.
+// Failing-CI workflow runs are dismissable; so are flagged/unknown pipeline
+// traces. Trace rows also recognize legacy key shapes so older localStorage
+// dismissals keep hiding the same PR journey after app updates.
+function dismissKeys(row) {
+  if (!row) return [];
+  if (state.view === "fail" && row.kind === "workflowRun") return normalizeDismissKeys(actionKey(row));
   if (state.view === "pipelineTraces" && (row.status === "flagged" || row.status === "unknown")) {
-    return traceDismissKey(row);
+    return traceDismissKeys(row);
   }
-  return null;
+  return [];
 }
 
-function renderDismissButton(key, label) {
-  const dismissed = isDismissed(key);
+function renderDismissButton(keys, label) {
+  const list = normalizeDismissKeys(keys);
+  const dismissed = anyDismissed(list);
+  const key = dismissed ? matchingDismissKey(list) : list[0];
   return `<button
     type="button"
     class="row-dismiss"
@@ -1984,10 +2014,10 @@ function renderTraceRow(row) {
   const timeDetail = [row.baseRef ? `base ${row.baseRef}` : "", row.lastEvidenceAt ? `last ${formatRelative(row.lastEvidenceAt)}` : ""]
     .filter(Boolean)
     .join(" · ");
-  const key = dismissKey(row);
-  const dismissed = key ? isDismissed(key) : false;
-  const dismissButton = key
-    ? renderDismissButton(key, `${row.repo} ${row.numberLabel || `#${row.prNumber}`}`)
+  const keys = dismissKeys(row);
+  const dismissed = anyDismissed(keys);
+  const dismissButton = keys.length
+    ? renderDismissButton(keys, `${row.repo} ${row.numberLabel || `#${row.prNumber}`}`)
     : "";
   return `
     <article class="trace-card trace-${escapeHtml(row.status || "active")}${dismissed ? " row-dismissed" : ""}" style="--accent: var(--${tone}); --soft: var(--${tone}-soft);" aria-label="${escapeHtml(row.repo)} ${escapeHtml(row.numberLabel || `#${row.prNumber}`)} pipeline trace">
@@ -2363,9 +2393,9 @@ function renderWorkflowRunRow(row, view) {
   const detail = row.conclusion
     ? [`Reason: ${failureDetail(row, "CI failed")}`, timeDetail].filter(Boolean).join(" · ")
     : timeDetail;
-  const key = dismissKey(row);
-  const dismissed = key ? isDismissed(key) : false;
-  const dismissButton = key ? renderDismissButton(key, `${row.workflow} ${row.runNumber}`) : "";
+  const keys = dismissKeys(row);
+  const dismissed = anyDismissed(keys);
+  const dismissButton = keys.length ? renderDismissButton(keys, `${row.workflow} ${row.runNumber}`) : "";
   const phaseBadge = renderPhaseBadge(row);
   return `
     <article class="row${dismissed ? " row-dismissed" : ""}${row.phaseStale ? " row-stale" : ""}" data-href="${escapeHtml(row.url || "")}" style="--accent: var(--${view.color}); --soft: var(--${view.color}-soft);">

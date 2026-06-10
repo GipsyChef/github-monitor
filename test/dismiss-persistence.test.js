@@ -118,13 +118,19 @@ function workflowRun(repo, runNumber) {
 // controls test — this does NOT clear pr-deck:dismissed:v1 on every navigation,
 // so a page reload preserves dismissals exactly like a real browser would across
 // a server restart. The browser context starts with empty storage anyway.
-async function openDashboard({ view = "fail", failedRuns = [] } = {}) {
+async function openDashboard({ view = "fail", failedRuns = [], dismissed = {} } = {}) {
   const browser = await chromium.launch();
   const page = await browser.newPage();
 
   await page.addInitScript((startView) => {
     localStorage.setItem("pr-deck:v1", JSON.stringify({ view: startView, traceFilter: "unknown" }));
   }, view);
+
+  if (Object.keys(dismissed).length) {
+    await page.addInitScript((items) => {
+      localStorage.setItem("pr-deck:dismissed:v1", JSON.stringify(items));
+    }, dismissed);
+  }
 
   const statusBody = failedRuns.length
     ? { ...statusFixture, actions: { ...statusFixture.actions, failed: failedRuns } }
@@ -149,6 +155,9 @@ async function openDashboard({ view = "fail", failedRuns = [] } = {}) {
 
 const readDismissedKeys = (page) =>
   page.evaluate(() => Object.keys(JSON.parse(localStorage.getItem("pr-deck:dismissed:v1") || "{}")));
+
+const pillCount = (page, key) =>
+  page.locator(`.trace-filterbar button[data-trace-filter="${key}"] strong`).innerText();
 
 test("a dismissed failing-CI run stays dismissed after a server restart (reload)", { skip }, async () => {
   const { browser, page } = await openDashboard({
@@ -222,6 +231,29 @@ test("dismissed pipeline traces stay dismissed after a server restart (reload)",
     await page.waitForSelector("[data-dismiss-all]");
     assert.equal(await page.locator("article.trace-card").count(), 3, "Restore all still works post-restart");
     assert.deepEqual(await readDismissedKeys(page), [], "localStorage cleared of dismissals after restore");
+  } finally {
+    await browser.close();
+  }
+});
+
+test("legacy trace dismiss keys still hide the same PR journey", { skip }, async () => {
+  const { browser, page } = await openDashboard({
+    view: "pipelineTraces",
+    dismissed: { "trace:acme/bravo:2": "2026-06-10T12:00:00Z" }
+  });
+  try {
+    await page.click('button[data-trace-filter="unknown"]');
+    await page.waitForSelector("#content");
+
+    assert.equal(await page.locator("article.trace-card").count(), 2, "legacy-dismissed journey stays hidden");
+    assert.equal(await pillCount(page, "unknown"), "2", "legacy dismissal is reflected in the sub-tab count");
+    assert.match(await page.locator(".dismiss-bar-label").innerText(), /1 dismissed item/);
+
+    await page.click("[data-restore-all]");
+    await page.waitForSelector("[data-dismiss-all]");
+
+    assert.equal(await page.locator("article.trace-card").count(), 3, "restore all removes the legacy dismissal");
+    assert.deepEqual(await readDismissedKeys(page), [], "legacy key is removed from localStorage");
   } finally {
     await browser.close();
   }
